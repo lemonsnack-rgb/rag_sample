@@ -1,18 +1,19 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 완결: 구글 드라이브 파일(dictionary.txt)을 이용한 유의어 사전 동적 관리)
+(최종 완결: UI 개선, 질문 확장, CSV 동의어 사전, 버그 수정 통합 버전)
 """
 
 import os
 import uuid
 import re
 import io
+import csv
 from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from pathlib import Path
 
-# 구글 드라이브 API 관련 임포트 (사전 파일 읽기용)
+# 구글 드라이브 API 관련 임포트
 try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
@@ -29,11 +30,9 @@ except ImportError:
     st.error("rag_module.py 파일을 찾을 수 없습니다.")
     st.stop()
 
-# ==================== [기본] 하드코딩 동의어 사전 (백업용) ====================
+# ==================== [기본] 백업용 사전 ====================
 DEFAULT_SYNONYMS = {
     "심사료": ["게재료", "투고료", "논문 게재", "학회비"],
-    "식대": ["중식비", "석식비", "회식비", "야근 식대"],
-    "교통비": ["출장비", "유류비", "주유비", "마일리지"],
 }
 
 # ==================== 환경 변수 및 설정 ====================
@@ -69,11 +68,10 @@ if 'admin_mode' not in st.session_state:
 if 'system_initialized' not in st.session_state:
     st.session_state.system_initialized = False
 
-# [동적 사전 변수] 드라이브에서 읽어온 사전을 저장할 공간
+# [동적 사전 변수]
 if 'dynamic_synonyms' not in st.session_state:
     st.session_state.dynamic_synonyms = DEFAULT_SYNONYMS.copy()
 
-# [일반 검색 전환 변수]
 if 'last_unanswered_query' not in st.session_state:
     st.session_state.last_unanswered_query = None
 
@@ -110,7 +108,7 @@ if not st.session_state.system_initialized:
         st.session_state.system_initialized = False
 
 
-# ==================== CSS 스타일링 (UI 유지) ====================
+# ==================== CSS 스타일링 ====================
 st.markdown("""
 <style>
     @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
@@ -200,38 +198,33 @@ def parse_used_docs(docs_str):
     except:
         return []
 
-# ==================== [신규] 구글 드라이브 사전 파일 읽기 함수 ====================
+# ==================== CSV 파일 읽기 함수 ====================
 def load_synonyms_from_drive(folder_id):
     """
-    구글 드라이브의 'dictionary.txt' 파일을 찾아 읽어서 딕셔너리로 반환
+    구글 드라이브의 'dictionary.csv' 파일을 찾아 읽어서 딕셔너리로 반환
     """
-    print("드라이브 사전 동기화 시도...")
+    print("드라이브 사전 동기화 시도 (CSV)...")
     try:
-        # 1. 인증 처리 (기존 환경 변수나 secrets 활용)
         creds = None
-        # secrets에 gcp_service_account가 있으면 사용
         if "gcp_service_account" in st.secrets:
             creds = service_account.Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"],
                 scopes=['https://www.googleapis.com/auth/drive.readonly']
             )
         else:
-            # 로컬 환경이나 기본 인증 시도
             creds, _ = google.auth.default()
 
         service = build('drive', 'v3', credentials=creds)
 
-        # 2. 파일 검색 (dictionary.txt)
-        query = f"name = 'dictionary.txt' and '{folder_id}' in parents and trashed = false"
+        query = f"name = 'dictionary.csv' and '{folder_id}' in parents and trashed = false"
         results = service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
 
         if not files:
-            return None, "사전 파일(dictionary.txt)을 찾을 수 없습니다."
+            return None, "사전 파일(dictionary.csv)을 찾을 수 없습니다."
 
         file_id = files[0]['id']
 
-        # 3. 파일 내용 다운로드
         request = service.files().get_media(fileId=file_id)
         file_io = io.BytesIO()
         downloader = MediaIoBaseDownload(file_io, request)
@@ -239,29 +232,43 @@ def load_synonyms_from_drive(folder_id):
         while done is False:
             status, done = downloader.next_chunk()
 
-        # 4. 텍스트 파싱
-        content = file_io.getvalue().decode('utf-8')
-        new_synonyms = {}
+        content_bytes = file_io.getvalue()
         
-        for line in content.split('\n'):
-            line = line.strip()
-            if not line or ':' not in line:
+        try:
+            content_str = content_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                content_str = content_bytes.decode('cp949')
+            except UnicodeDecodeError:
+                return None, "CSV 파일 인코딩을 인식할 수 없습니다. (UTF-8 또는 CP949 권장)"
+
+        new_synonyms = {}
+        f = io.StringIO(content_str)
+        reader = csv.reader(f)
+        
+        for row in reader:
+            if len(row) < 2:
                 continue
-            key, values = line.split(':', 1)
-            # 콤마로 구분된 값들을 리스트로 변환
-            val_list = [v.strip() for v in values.split(',')]
-            new_synonyms[key.strip()] = val_list
+            
+            key = row[0].strip()
+            synonym_str = row[1].strip()
+            synonym_str = synonym_str.replace('|', ',')
+            
+            val_list = [v.strip() for v in synonym_str.split(',') if v.strip()]
+            
+            if key and val_list:
+                new_synonyms[key] = val_list
             
         return new_synonyms, f"성공! {len(new_synonyms)}개의 키워드를 로드했습니다."
 
     except Exception as e:
         return None, f"오류 발생: {str(e)}"
 
-# ==================== 질문 확장 함수 (수정됨) ====================
+# ==================== 질문 확장 함수 ====================
 def expand_query(original_query, llm):
     final_keywords = [original_query]
     
-    # 1. [수정] 동적 사전 체크 (드라이브에서 불러온 값 사용)
+    # 1. 동적 사전 체크
     current_dict = st.session_state.dynamic_synonyms
     for key, values in current_dict.items():
         if key in original_query:
@@ -336,15 +343,15 @@ with st.sidebar:
                     if fid:
                         with st.spinner("문서 동기화 중..."):
                             try:
-                                cnt = sync_drive_to_db(fid, st.session_state.supabase_client, st.session_state.embeddings)
+                                # [수정 완료] 인자 2개로 호출
+                                cnt = sync_drive_to_db(fid, st.session_state.supabase_client)
                                 st.success(f"{cnt}개 완료")
                             except Exception as e: st.error(f"오류: {e}")
             
-            # [신규] 사전 동기화 버튼
             with col_dic:
-                if st.button("유의어 사전 동기화", use_container_width=True):
+                if st.button("동의어(CSV) 동기화", use_container_width=True):
                     if fid:
-                        with st.spinner("dictionary.txt 읽는 중..."):
+                        with st.spinner("dictionary.csv 읽는 중..."):
                             new_dict, msg = load_synonyms_from_drive(fid)
                             if new_dict:
                                 st.session_state.dynamic_synonyms = new_dict
@@ -358,7 +365,6 @@ with st.sidebar:
                         if reset_database(st.session_state.supabase_client): st.success("완료")
                         else: st.error("실패")
             
-            # 현재 적용된 유의어 확인 (디버깅용)
             with st.expander("현재 적용된 유의어 확인"):
                 st.json(st.session_state.dynamic_synonyms)
 
@@ -366,7 +372,6 @@ with st.sidebar:
 curr_session = st.session_state.chat_sessions[st.session_state.current_session_id]
 curr_messages = curr_session['messages']
 
-# 초기 화면
 if len(curr_messages) == 0:
     st.markdown("<div style='height: 15vh'></div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -395,9 +400,7 @@ else:
     for q, a in curr_messages:
         with st.chat_message("user", avatar="user"): st.write(q)
         with st.chat_message("assistant", avatar="assistant"):
-            # 답변에서 DOCS 정보 분리
             display_text = a
-            
             if "===DOCS:" in a:
                 main_part, docs_part = a.split("===DOCS:", 1)
                 display_text = main_part.strip()
@@ -408,7 +411,6 @@ else:
                 with st.expander("상세 보기"): st.markdown(parts[1].strip())
             else: st.write(display_text)
 
-# [버튼 표시 로직]
 if st.session_state.last_unanswered_query:
     st.markdown("---")
     st.warning(f"'{st.session_state.last_unanswered_query}'에 대한 답변이 사내 문서에 없습니다.")
@@ -429,7 +431,6 @@ if st.session_state.last_unanswered_query:
                 st.rerun()
             except Exception as e: st.error(f"오류: {e}")
 
-# 입력창
 user_question = st.chat_input("메시지를 입력하세요...")
 if 'pending_question' in st.session_state and st.session_state.pending_question:
     user_question = st.session_state.pending_question
@@ -446,11 +447,11 @@ if user_question:
     with st.chat_message("assistant", avatar="assistant"):
         with st.spinner("관련 키워드 확장 및 문서 검색 중..."):
             try:
-                # 1. 질문 확장 (동적 사전 + AI)
+                # 1. 질문 확장
                 search_queries = expand_query(user_question, st.session_state.llm)
                 st.info(f"💡 확장된 검색어: {', '.join(search_queries)}")
                 
-                # 2. 다각도 검색 수행
+                # 2. 검색 수행
                 all_docs = []
                 all_infos = []
                 seen_contents = set()
