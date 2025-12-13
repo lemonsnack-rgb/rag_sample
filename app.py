@@ -1,6 +1,6 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 완결: PDF/PPT/XLS/DOC/OCR 통합 + UI 개선 + 문법 오류 수정)
+(최종 완결: PDF/PPT/XLS/DOC/OCR/CSV 통합 + UI 개선 + 에러 방지 포함)
 """
 import os
 import json
@@ -12,7 +12,6 @@ import csv
 from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
-from pathlib import Path
 
 # ==================== [1. 시스템 인증 강제 적용] ====================
 # rag_module.py 등 외부 파일에서 구글 인증을 찾을 수 있도록 환경변수 강제 주입
@@ -27,7 +26,7 @@ if "gcp_service_account" in st.secrets:
     except Exception as e:
         st.error(f"인증 파일 생성 에러: {e}")
 
-# ==================== [2. 라이브러리 임포트] ====================
+# ==================== [2. 라이브러리 임포트 및 의존성 확인] ====================
 try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
@@ -37,11 +36,12 @@ except ImportError:
     st.error("Google API 라이브러리가 없습니다. requirements.txt를 확인하세요.")
     st.stop()
 
+# RAG 모듈 로딩 (실패 시 원인 출력)
 try:
-    # rag_module.py가 같은 폴더에 있어야 함
     from rag_module import init_vector_store, sync_drive_to_db, search_similar_documents, get_indexed_documents, reset_database
-except ImportError:
-    st.error("rag_module.py 파일을 찾을 수 없습니다. GitHub에 파일이 있는지 확인하세요.")
+except Exception as e:
+    st.error(f"🚨 rag_module.py 로딩 실패! 원인: {e}")
+    st.info("팁: requirements.txt에 'python-pptx', 'openpyxl', 'Pillow' 등이 포함되어 있는지 확인하고 Reboot 하세요.")
     st.stop()
 
 # ==================== [3. 기본 설정 및 세션 초기화] ====================
@@ -90,7 +90,8 @@ if not st.session_state.system_initialized:
             st.session_state.llm = None
             
         st.session_state.system_initialized = True
-    except:
+    except Exception as e:
+        st.warning(f"시스템 초기화 중 경고 (DB연결 실패 등): {e}")
         st.session_state.system_initialized = False
 
 # ==================== [4. 스타일링] ====================
@@ -308,6 +309,7 @@ if query := st.chat_input("질문을 입력하세요..."):
                     1. 정보가 없으면 '[NO_CONTENT]'라고 답해라.
                     2. [핵심 요약]은 불릿포인트로 간결하게 요약해라.
                     3. [상세 내용]은 전문성을 갖추되, 가독성을 위해 **### 소제목**과 **문단 간 빈 줄**을 반드시 사용해라.
+                    4. 표 내용이 있다면 마크다운 표 형식으로 정리해라.
                     
                     답변형식:
                     [핵심 요약]
