@@ -21,8 +21,11 @@ try:
 except ImportError as e:
     raise ImportError(f"필수 라이브러리 부족: {e}")
 
-# ==================== [텍스트 전처리 및 섹션 인식] ====================
+# ==================== [텍스트 전처리] ====================
 def preprocess_text_with_section_headers(text):
+    # 1. Null 문자 제거 (DB 에러 방지)
+    if text: text = text.replace('\x00', '')
+        
     lines = text.split('\n')
     processed_lines = []
     current_section = "일반"
@@ -32,7 +35,6 @@ def preprocess_text_with_section_headers(text):
         stripped_line = line.strip()
         if not stripped_line: continue
         
-        # 이미 태그가 있으면(엑셀/PPT 등) 유지
         if stripped_line.startswith('[') and ']' in stripped_line:
             processed_lines.append(stripped_line)
             continue
@@ -45,14 +47,37 @@ def preprocess_text_with_section_headers(text):
             processed_lines.append(enriched_line)
     return "\n".join(processed_lines)
 
-# ==================== [파일 포맷별 텍스트 추출] ====================
+# ==================== [파일 포맷별 텍스트 추출 (OCR 강화)] ====================
+
 def extract_text_from_pdf(fh):
+    """
+    PDF 텍스트 추출 (하이브리드 방식)
+    1. 기본 텍스트 추출 시도
+    2. 실패하거나 내용이 없으면 -> 페이지 내 이미지 OCR 수행
+    """
     text = ""
     try:
         reader = pypdf.PdfReader(fh)
         for page in reader.pages:
-            t = page.extract_text()
-            if t: text += t + "\n"
+            # 1단계: 텍스트 레이어 추출
+            page_text = page.extract_text()
+            
+            # 텍스트가 있으면 그대로 사용
+            if page_text and page_text.strip():
+                text += page_text + "\n"
+            else:
+                # 2단계: 텍스트가 없으면(스캔본) 이미지 OCR 시도
+                try:
+                    for image_file in page.images:
+                        image_data = image_file.data
+                        img = Image.open(io.BytesIO(image_data))
+                        # 한글+영어 OCR 수행
+                        ocr_text = pytesseract.image_to_string(img, lang='kor+eng')
+                        text += ocr_text + "\n"
+                except Exception:
+                    # OCR 실패 시 그냥 넘어감 (어쩔 수 없음)
+                    pass
+                    
     except Exception as e: print(f"PDF Error: {e}")
     return text
 
@@ -136,7 +161,7 @@ def extract_text_from_image(fh):
     except Exception as e: print(f"OCR Error: {e}")
     return text
 
-# ==================== [핵심 로직: Supabase 연결 및 동기화] ====================
+# ==================== [Supabase 연결 및 동기화] ====================
 
 def init_vector_store():
     url = os.environ.get("SUPABASE_URL")
@@ -194,7 +219,7 @@ def sync_drive_to_db(folder_id, supabase_client):
             elif ext in ['jpg', 'png', 'jpeg']: content = extract_text_from_image(fh)
             
             if not content.strip():
-                st.error(f"⚠️ {fname} 내용 없음")
+                st.error(f"⚠️ {fname} 내용 없음 (OCR로도 텍스트를 찾지 못했습니다)")
                 continue
                 
             processed = preprocess_text_with_section_headers(content)
@@ -221,13 +246,10 @@ def search_similar_documents(query, client, embeddings, top_k=5):
         infos.append({"content": d.page_content, "filename": d.metadata.get("source"), "score": s})
     return docs, infos
 
-# ==================== [🚨 누락되었던 함수 추가됨] ====================
 def get_indexed_documents(client):
-    """현재 인덱싱된 문서 목록 조회 (Placeholder)"""
     return []
 
 def reset_database(client):
-    """DB 초기화 함수"""
     try: 
         client.table("documents").delete().neq("id", 0).execute()
         return True
