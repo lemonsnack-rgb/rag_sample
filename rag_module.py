@@ -23,9 +23,7 @@ except ImportError as e:
 
 # ==================== [텍스트 전처리] ====================
 def preprocess_text_with_section_headers(text):
-    # 1. Null 문자 제거 (DB 에러 방지)
-    if text: text = text.replace('\x00', '')
-        
+    if text: text = text.replace('\x00', '') # Null 문자 제거
     lines = text.split('\n')
     processed_lines = []
     current_section = "일반"
@@ -34,11 +32,9 @@ def preprocess_text_with_section_headers(text):
     for line in lines:
         stripped_line = line.strip()
         if not stripped_line: continue
-        
         if stripped_line.startswith('[') and ']' in stripped_line:
             processed_lines.append(stripped_line)
             continue
-
         if header_pattern.match(stripped_line):
             current_section = stripped_line
             processed_lines.append(line)
@@ -47,37 +43,20 @@ def preprocess_text_with_section_headers(text):
             processed_lines.append(enriched_line)
     return "\n".join(processed_lines)
 
-# ==================== [파일 포맷별 텍스트 추출 (OCR 강화)] ====================
-
+# ==================== [파일 포맷별 텍스트 추출] ====================
 def extract_text_from_pdf(fh):
-    """
-    PDF 텍스트 추출 (하이브리드 방식)
-    1. 기본 텍스트 추출 시도
-    2. 실패하거나 내용이 없으면 -> 페이지 내 이미지 OCR 수행
-    """
     text = ""
     try:
         reader = pypdf.PdfReader(fh)
         for page in reader.pages:
-            # 1단계: 텍스트 레이어 추출
-            page_text = page.extract_text()
-            
-            # 텍스트가 있으면 그대로 사용
-            if page_text and page_text.strip():
-                text += page_text + "\n"
+            t = page.extract_text()
+            if t: text += t + "\n"
             else:
-                # 2단계: 텍스트가 없으면(스캔본) 이미지 OCR 시도
                 try:
                     for image_file in page.images:
-                        image_data = image_file.data
-                        img = Image.open(io.BytesIO(image_data))
-                        # 한글+영어 OCR 수행
-                        ocr_text = pytesseract.image_to_string(img, lang='kor+eng')
-                        text += ocr_text + "\n"
-                except Exception:
-                    # OCR 실패 시 그냥 넘어감 (어쩔 수 없음)
-                    pass
-                    
+                        img = Image.open(io.BytesIO(image_file.data))
+                        text += pytesseract.image_to_string(img, lang='kor+eng') + "\n"
+                except: pass
     except Exception as e: print(f"PDF Error: {e}")
     return text
 
@@ -109,8 +88,7 @@ def extract_text_from_xlsx(fh, fname):
                     if i < len(headers) and c.value is not None:
                         val = str(c.value).strip()
                         if val: parts.append(f"{headers[i]}: {val}")
-                if parts:
-                    text += f"[{fname}-{sname}] " + ", ".join(parts) + "\n"
+                if parts: text += f"[{fname}-{sname}] " + ", ".join(parts) + "\n"
     except Exception as e: print(f"XLSX Error: {e}")
     return text
 
@@ -122,8 +100,7 @@ def extract_text_from_pptx(fh):
             stext = []
             for shape in slide.shapes:
                 if hasattr(shape, "text"): stext.append(shape.text)
-            if stext:
-                text += f"[슬라이드 {i+1}] " + "\n".join(stext) + "\n"
+            if stext: text += f"[슬라이드 {i+1}] " + "\n".join(stext) + "\n"
     except Exception as e: print(f"PPTX Error: {e}")
     return text
 
@@ -148,8 +125,7 @@ def extract_text_from_csv(fh, fname):
             for i, v in enumerate(row):
                 if i < len(headers) and v.strip():
                     parts.append(f"{headers[i]}: {v.strip()}")
-            if parts:
-                text += f"[{fname}] " + ", ".join(parts) + "\n"
+            if parts: text += f"[{fname}] " + ", ".join(parts) + "\n"
     except Exception as e: print(f"CSV Error: {e}")
     return text
 
@@ -161,7 +137,7 @@ def extract_text_from_image(fh):
     except Exception as e: print(f"OCR Error: {e}")
     return text
 
-# ==================== [Supabase 연결 및 동기화] ====================
+# ==================== [핵심 로직: Supabase 연결] ====================
 
 def init_vector_store():
     url = os.environ.get("SUPABASE_URL")
@@ -179,13 +155,13 @@ def sync_drive_to_db(folder_id, supabase_client):
     creds, _ = google.auth.default()
     service = build('drive', 'v3', credentials=creds)
     
-    # 파일 목록 조회
     res = service.files().list(q=f"'{folder_id}' in parents and trashed=false", fields="files(id, name)").execute()
     files = res.get('files', [])
     
     st.write(f"🔍 폴더 내 파일 {len(files)}개 감지됨")
     
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    # 업로드는 LangChain 사용 (문제 없음)
     vector_store = SupabaseVectorStore(client=supabase_client, embedding=embeddings, table_name="documents", query_name="match_documents")
     
     cnt = 0
@@ -196,7 +172,6 @@ def sync_drive_to_db(folder_id, supabase_client):
         ext = fname.split('.')[-1].lower() if '.' in fname else ""
         progress.progress((i+1)/len(files))
         
-        # 지원 확장자 체크
         if ext not in ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'csv', 'md', 'jpg', 'jpeg', 'png']:
             st.warning(f"⏩ [Skip] {fname}")
             continue
@@ -219,7 +194,7 @@ def sync_drive_to_db(folder_id, supabase_client):
             elif ext in ['jpg', 'png', 'jpeg']: content = extract_text_from_image(fh)
             
             if not content.strip():
-                st.error(f"⚠️ {fname} 내용 없음 (OCR로도 텍스트를 찾지 못했습니다)")
+                st.error(f"⚠️ {fname} 내용 없음")
                 continue
                 
             processed = preprocess_text_with_section_headers(content)
@@ -236,15 +211,53 @@ def sync_drive_to_db(folder_id, supabase_client):
     progress.empty()
     return cnt
 
+# ==================== [핵심 수정: 검색 함수 (Native RPC 호출)] ====================
 def search_similar_documents(query, client, embeddings, top_k=5):
-    vs = SupabaseVectorStore(client=client, embedding=embeddings, table_name="documents", query_name="match_documents")
-    res = vs.similarity_search_with_relevance_scores(query, k=top_k)
-    docs, infos = [], []
-    for d, s in res:
-        if s < 0.3: continue
-        docs.append(d)
-        infos.append({"content": d.page_content, "filename": d.metadata.get("source"), "score": s})
-    return docs, infos
+    """
+    LangChain wrapper를 사용하지 않고 Supabase Client를 직접 사용하여 검색합니다.
+    (SyncRPCFilterRequestBuilder 에러 방지용)
+    """
+    try:
+        # 1. 쿼리를 벡터로 변환
+        query_vector = embeddings.embed_query(query)
+
+        # 2. Supabase RPC 직접 호출
+        params = {
+            "query_embedding": query_vector,
+            "match_threshold": 0.3, # 유사도 임계값
+            "match_count": top_k
+        }
+        
+        # .execute()를 사용하여 쿼리 실행
+        response = client.rpc("match_documents", params).execute()
+        
+        # 3. 결과 데이터를 Document 객체로 변환
+        docs = []
+        infos = []
+        
+        # response.data는 리스트[딕셔너리] 형태
+        for item in response.data:
+            content = item.get("content", "")
+            metadata = item.get("metadata", {})
+            score = item.get("similarity", 0.0)
+            
+            # Document 객체 생성
+            doc = Document(page_content=content, metadata=metadata)
+            docs.append(doc)
+            
+            # 정보 딕셔너리 생성
+            infos.append({
+                "content": content,
+                "filename": metadata.get("source", "Unknown"),
+                "score": score
+            })
+            
+        return docs, infos
+
+    except Exception as e:
+        print(f"Search Error: {e}")
+        # 에러 발생 시 빈 리스트 반환하여 앱이 멈추지 않게 함
+        return [], []
 
 def get_indexed_documents(client):
     return []
