@@ -1,6 +1,6 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 마스터 코드: 답변 품질(프롬프트) 재설계 + 모든 기능/UI 통합)
+(최종 마스터 코드: 프롬프트 맥락 주입 및 상세 내용 길이 강제 포함)
 """
 import os
 import json
@@ -34,7 +34,11 @@ try:
     from rag_module import init_vector_store, sync_drive_to_db, search_similar_documents, get_indexed_documents, reset_database
 except Exception as e: st.error(f"🚨 rag_module.py 로딩 실패! 원인: {e}"); st.stop()
 
-DEFAULT_SYNONYMS = {"심사료": ["게재료", "투고료", "논문 게재", "학회비"]}
+# 🌟 기본 동의어 사전 (최종 확인) 🌟
+DEFAULT_SYNONYMS = {
+    "심사료": ["게재료", "투고료", "논문 게재", "학회비", "논문 심사료"],
+    "인건비": ["노무비", "인력운영비", "학생 인건비"]
+}
 
 try:
     secrets_dict = dict(st.secrets)
@@ -125,14 +129,21 @@ def load_synonyms_from_drive(folder_id):
 
 def expand_query(original_query, llm):
     final = [original_query]
+    # 1. 사전 기반 (필수 확장)
     for k, v in st.session_state.dynamic_synonyms.items():
-        if k in original_query: final.extend(v)
+        if k in original_query: 
+            final.extend(v)
+        elif any(word in original_query for word in v):
+             final.append(k)
+
+    # 2. LLM 기반 (선택적 확장)
     try:
         if llm:
-            prompt = f"질문 '{original_query}'의 검색 키워드 2개 추천 (단어만, 쉼표로 구분)"
+            prompt = f"질문 '{original_query}'의 검색 키워드 2개만 추천해줘 (단어만, 쉼표로 구분)"
             res = llm.generate_content(prompt)
-            final.extend([k.strip() for k in res.text.split(',')])
+            final.extend([k.strip() for k in res.text.split(',') if k.strip()])
     except: pass
+    
     return list(set(final))
 
 # ==================== [5. 사이드바] ====================
@@ -280,13 +291,13 @@ if query := st.chat_input("질문을 입력하세요..."):
                     msg = "죄송합니다. 관련 사내 문서를 찾을 수 없습니다."
                     st.write(msg)
                     curr_messages.append((query, msg))
-                    st.session_state.last_unanswered_query = query 
+                    st.session_state.last_unanswered_query = query # 버튼 활성화 트리거
                     st.session_state.chat_sessions[st.session_state.current_session_id]['messages'] = curr_messages
                     st.rerun()
                 else:
                     context_text = format_docs([x[0] for x in combined])
                     
-                    # 🌟🌟🌟 [프롬프트 재설계 최종판] - 맥락 주입 및 내용 충실성 강화 🌟🌟🌟
+                    # 🌟🌟🌟 [프롬프트 최종 마스터] - 맥락 주입 및 내용 충실성 강화 🌟🌟🌟
                     main_source = combined[0][0].metadata.get('source', '문서')
                     
                     prompt = f"""
