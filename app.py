@@ -1,6 +1,6 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 완결: 요약은 개조식, 상세 내용은 전문성 강화)
+(최종 완결: 질문 확장(Query Expansion) 기능을 통해 검색 정확도 극대화)
 """
 
 import os
@@ -102,7 +102,7 @@ st.markdown("""
     [data-testid="stSidebar"] { background-color: #f8f9fa; border-right: 1px solid #e9ecef; }
 
     .block-container {
-        max-width: 800px !important;
+        max-width: 900px !important;
         padding-top: 3rem;
         padding-bottom: 20rem; /* 하단 여백 확보 */
         margin: 0 auto;
@@ -112,10 +112,10 @@ st.markdown("""
         background: transparent; box-shadow: none; padding-bottom: 40px; z-index: 99;
     }
     [data-testid="stBottom"] > div {
-        max-width: 800px !important; margin: 0 auto; width: 100%; box-shadow: none;
+        max-width: 900px !important; margin: 0 auto; width: 100%; box-shadow: none;
     }
     [data-testid="stChatInput"] {
-        max-width: 800px !important; margin: 0 auto !important;
+        max-width: 900px !important; margin: 0 auto !important;
         border-radius: 20px; border: 1px solid #dfe1e5; background-color: white;
         position: relative !important;
     }
@@ -180,6 +180,28 @@ def parse_used_docs(docs_str):
         return [int(n) for n in nums]
     except:
         return []
+
+# [핵심 추가] 질문 확장(Query Expansion) 함수
+def expand_query(original_query, llm):
+    try:
+        # Gemini에게 유사한 검색 키워드를 물어봄
+        prompt = f"""사용자의 질문을 바탕으로 사내 문서 검색에 사용할 '핵심 키워드' 2~3개를 추천해라.
+        질문의 의도를 파악해서 동의어나 관련 용어를 포함해라.
+        
+        질문: {original_query}
+        
+        [출력 형식]
+        키워드1, 키워드2, 키워드3 (콤마로 구분, 설명 없이 단어만 출력)
+        예: 심사료 -> 심사료, 심사비, 게재료, 투고료
+        """
+        response = llm.generate_content(prompt)
+        expanded_text = response.text.strip()
+        keywords = [k.strip() for k in expanded_text.split(',')]
+        
+        # 원본 질문도 포함
+        return [original_query] + keywords
+    except:
+        return [original_query]
 
 # ==================== 사이드바 ====================
 with st.sidebar:
@@ -325,20 +347,43 @@ if user_question:
     with st.chat_message("user", avatar="user"): st.write(user_question)
 
     with st.chat_message("assistant", avatar="assistant"):
-        with st.spinner("문서 확인 및 답변 생성 중..."):
+        with st.spinner("관련 키워드 확장 및 문서 검색 중..."):
             try:
-                # 1. 문서 검색 (Top 7)
-                source_docs, similarity_info = search_similar_documents(
-                    query=user_question,
-                    supabase_client=st.session_state.supabase_client,
-                    embeddings=st.session_state.embeddings,
-                    top_k=7
-                )
-
-                # 원본 텍스트 병합
-                for i, doc in enumerate(source_docs):
-                    if i < len(similarity_info):
-                        similarity_info[i]['content'] = doc.page_content
+                # 1. [핵심 로직] 질문 확장 (Query Expansion)
+                # 사용자의 질문을 기반으로 AI가 3개 정도의 검색 키워드를 생성함
+                search_queries = expand_query(user_question, st.session_state.llm)
+                
+                # 확장된 키워드로 각각 검색 수행 후 결과 합치기
+                all_docs = []
+                all_infos = []
+                seen_contents = set() # 중복 제거용
+                
+                for q in search_queries:
+                    docs, infos = search_similar_documents(
+                        query=q,
+                        supabase_client=st.session_state.supabase_client,
+                        embeddings=st.session_state.embeddings,
+                        top_k=5 # 각 키워드당 5개씩
+                    )
+                    
+                    for doc, info in zip(docs, infos):
+                        # 중복 제거 (내용 기준)
+                        if doc.page_content not in seen_contents:
+                            seen_contents.add(doc.page_content)
+                            all_docs.append(doc)
+                            # 원본 텍스트 미리 병합
+                            info['content'] = doc.page_content
+                            all_infos.append(info)
+                
+                # 검색 결과(source_docs, similarity_info) 최종 정리
+                # 유사도 점수 높은 순으로 정렬 (선택 사항이나 보통 검색 결과 합치면 정렬 필요)
+                # 여기서는 API에서 이미 정렬되어 오지만, 합쳤으므로 score 기준 재정렬
+                combined = list(zip(all_docs, all_infos))
+                combined.sort(key=lambda x: x[1]['score'], reverse=True)
+                
+                # 상위 15개만 자르기
+                source_docs = [x[0] for x in combined][:15]
+                similarity_info = [x[1] for x in combined][:15]
 
                 if not source_docs:
                     msg = "관련된 사내 문서를 찾을 수 없습니다."
@@ -352,7 +397,6 @@ if user_question:
                 else:
                     context = format_docs(source_docs)
                     if st.session_state.llm:
-                        # [핵심 수정] 상세 보기의 질을 높이기 위해 "존댓말"보다는 "내용의 전문성"을 강조
                         prompt = f"""너는 사내 규정 전문가다. 아래 [Context]를 읽고 질문에 답해라.
 
 [Context]:
@@ -411,11 +455,13 @@ if user_question:
                             if 0 <= idx-1 < len(similarity_info):
                                 valid_docs.append(similarity_info[idx-1])
                         
+                        # AI가 선택한 문서가 없거나(파싱 실패 등), 부족할 경우 유사도 상위 문서를 보여줌
                         final_docs_to_show = valid_docs if valid_docs else similarity_info[:3]
                         label = "AI가 참고한 문서 (클릭하여 원본 보기)" if valid_docs else "유사 문서 (자동 추천)"
 
                         st.markdown(f"**📂 {label} ({len(final_docs_to_show)}개)**")
                         for i, info in enumerate(final_docs_to_show, 1):
+                            # [핵심] 사용자가 유사도를 확인할 수 있도록 Score 표시
                             with st.expander(f"{i}. {info['filename']} (유사도: {info['score']:.2f})"):
                                 st.info("아래는 색인된 원본 데이터입니다.")
                                 st.text(info.get('content', '내용 없음'))
