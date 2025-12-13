@@ -1,6 +1,6 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 수정: 버튼 출력 방식, NO_CONTENT 오류 처리 로직 강화)
+(최종 마스터 코드: 답변 품질(프롬프트) 재설계 + 모든 기능/UI 통합)
 """
 import os
 import json
@@ -54,7 +54,7 @@ if 'llm' not in st.session_state: st.session_state.llm = None
 if 'admin_mode' not in st.session_state: st.session_state.admin_mode = False
 if 'system_initialized' not in st.session_state: st.session_state.system_initialized = False
 if 'dynamic_synonyms' not in st.session_state: st.session_state.dynamic_synonyms = DEFAULT_SYNONYMS.copy()
-if 'last_unanswered_query' not in st.session_state: st.session_state.last_unanswered_query = None 
+if 'last_unanswered_query' not in st.session_state: st.session_state.last_unanswered_query = None
 if 'chat_sessions' not in st.session_state: st.session_state.chat_sessions = {}
 if 'current_session_id' not in st.session_state:
     first_session_id = str(uuid.uuid4())
@@ -75,7 +75,7 @@ if not st.session_state.system_initialized:
         st.session_state.system_initialized = True
     except: st.session_state.system_initialized = False
 
-# ==================== [3. CSS 스타일링] ====================
+# ==================== [3. CSS 스타일링 (UI 유지)] ====================
 st.markdown("""
 <style>
     @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
@@ -85,9 +85,12 @@ st.markdown("""
     [data-testid="stChatMessage"][data-testid-user-avatar="true"] { background-color: #E3F2FD; }
     [data-testid="stChatMessage"][data-testid-user-avatar="false"] { background-color: #FFFFFF; border: 1px solid #e0e0e0; }
     [data-testid="stBottom"] > div, [data-testid="stChatInput"] { max-width: 800px !important; margin: 0 auto !important; }
+    [data-testid="stChatInput"] { position: relative !important; }
     [data-testid="stChatInput"]::after {
         content: '⚠️ AI 답변은 부정확할 수 있으며, 중요 사안은 반드시 원문 규정을 확인하시기 바랍니다.';
-        display: block; text-align: center; font-size: 12px; color: #888; margin-top: 10px; margin-bottom: 20px;
+        display: block; text-align: center; font-size: 12px; color: #888; 
+        position: absolute; bottom: -25px; left: 50%; transform: translateX(-50%);
+        width: 100%; max-width: 800px; visibility: visible;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -220,18 +223,16 @@ else:
                     detail_part = parts[1].split("===DOCS:")[0]
                     with st.expander("상세 내용 보기"):
                         st.markdown(detail_part.strip())
-            # [수정] NO_CONTENT가 그대로 노출되는 것을 방지하기 위해 일반 텍스트 출력 전에 필터링합니다.
             elif "[NO_CONTENT]" in a:
                 st.write("문서 내용을 분석했으나, 질문에 대한 정확한 답변을 찾을 수 없습니다.")
             else:
                 st.write(a)
 
-# (3) [일반 지식 검색 복구 및 버튼 출력 방식 수정] 결과 없음 시 버튼 표시
+# (3) 일반 지식 검색 버튼 표시
 if st.session_state.last_unanswered_query:
     st.markdown("---")
     st.warning(f"'{st.session_state.last_unanswered_query}'에 대한 정보가 사내 문서에 없습니다.")
     
-    # 🌟 버튼 출력을 위한 새로운 컨테이너 생성 및 한 줄 출력 강제
     st.container()
     if st.button("🌐 일반 지식(Gemini)으로 검색", use_container_width=True, type="primary", key="general_search_btn"):
         with st.spinner("외부 지식 검색 중..."):
@@ -279,14 +280,15 @@ if query := st.chat_input("질문을 입력하세요..."):
                     msg = "죄송합니다. 관련 사내 문서를 찾을 수 없습니다."
                     st.write(msg)
                     curr_messages.append((query, msg))
-                    st.session_state.last_unanswered_query = query # 버튼 활성화 트리거
+                    st.session_state.last_unanswered_query = query 
                     st.session_state.chat_sessions[st.session_state.current_session_id]['messages'] = curr_messages
                     st.rerun()
                 else:
                     context_text = format_docs([x[0] for x in combined])
                     
+                    # 🌟🌟🌟 [프롬프트 재설계] - 논리적 오류 해결 🌟🌟🌟
                     prompt = f"""
-                    너는 사내 규정 전문가다. [Context]를 바탕으로 답변해라.
+                    너는 유능한 사내 규정 전문가다. 아래 [Context]를 바탕으로 직원의 질문에 정중하고 명확하게 답변해라.
                     
                     [Context]:
                     {context_text}
@@ -294,18 +296,23 @@ if query := st.chat_input("질문을 입력하세요..."):
                     질문: {query}
                     
                     [지침]
-                    1. 내용의 완결성: 내용을 생략하지 말고 구체적 수치/조건을 포함해라.
-                    2. 가독성: **### 소제목**과 **문단 간 빈 줄**을 사용해라.
-                    3. 표: 마크다운 표(Table)로 변환해라.
-                    4. 답이 없으면 `[NO_CONTENT]` 라고만 써라.
+                    1. **내용의 완결성 (최우선):** Context의 내용을 절대 생략하지 말고, 구체적인 수치, 조건, 예외사항을 빠짐없이 포함하여 전문적으로 상세하게 작성해라.
+                    2. **가독성/구조화:**
+                       - **[핵심 요약]** 섹션은 **개조식(명사형 종결) 불릿포인트**로 간결하게 요약해라.
+                       - **[상세 내용]** 섹션은 1. 내용의 완결성 지침을 따라 Context의 내용을 상세하고 충분하게 작성해라.
+                       - **서식:** 내용 구조화를 위해 **### 소제목**과 **문단 간 빈 줄**을 반드시 사용해라. 표 데이터는 **마크다운 표**로 정리해라.
+                    3. 답이 없으면 `[NO_CONTENT]` 라고만 써라.
                     
                     답변형식:
                     [핵심 요약]
                     - 요약1
+                    - 요약2
                     ===DETAIL_START===
-                    ### 제목
-                    내용...
-                    (빈 줄)
+                    ### 상세 내용의 소제목 (예: 부록 구성 원칙)
+                    내용 기술...
+                    (반드시 빈 줄)
+                    ### 다음 소제목 (예: 번호 사용법)
+                    내용 기술...
                     ===DOCS: 문서번호===
                     """
                     
@@ -313,12 +320,11 @@ if query := st.chat_input("질문을 입력하세요..."):
                         res = st.session_state.llm.generate_content(prompt)
                         ans = res.text.strip()
                         
-                        # [수정] AI가 NO_CONTENT를 반환한 경우 처리
                         if "[NO_CONTENT]" in ans:
                             msg = "문서 내용을 분석했으나, 질문에 대한 정확한 답변을 찾을 수 없습니다."
                             st.write(msg)
                             curr_messages.append((query, msg))
-                            st.session_state.last_unanswered_query = query # 버튼 활성화 트리거
+                            st.session_state.last_unanswered_query = query 
                             st.session_state.chat_sessions[st.session_state.current_session_id]['messages'] = curr_messages
                             st.rerun()
                         else:
