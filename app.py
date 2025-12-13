@@ -1,15 +1,26 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 완결: 질문 확장(Query Expansion) 기능을 통해 검색 정확도 극대화)
+(최종 완결: 구글 드라이브 파일(dictionary.txt)을 이용한 유의어 사전 동적 관리)
 """
 
 import os
 import uuid
 import re
+import io
 from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from pathlib import Path
+
+# 구글 드라이브 API 관련 임포트 (사전 파일 읽기용)
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    from google.oauth2 import service_account
+    import google.auth
+except ImportError:
+    st.error("Google API 라이브러리가 필요합니다. requirements.txt를 확인하세요.")
+    st.stop()
 
 # RAG 모듈 임포트
 try:
@@ -17,6 +28,13 @@ try:
 except ImportError:
     st.error("rag_module.py 파일을 찾을 수 없습니다.")
     st.stop()
+
+# ==================== [기본] 하드코딩 동의어 사전 (백업용) ====================
+DEFAULT_SYNONYMS = {
+    "심사료": ["게재료", "투고료", "논문 게재", "학회비"],
+    "식대": ["중식비", "석식비", "회식비", "야근 식대"],
+    "교통비": ["출장비", "유류비", "주유비", "마일리지"],
+}
 
 # ==================== 환경 변수 및 설정 ====================
 try:
@@ -50,6 +68,10 @@ if 'admin_mode' not in st.session_state:
     st.session_state.admin_mode = False
 if 'system_initialized' not in st.session_state:
     st.session_state.system_initialized = False
+
+# [동적 사전 변수] 드라이브에서 읽어온 사전을 저장할 공간
+if 'dynamic_synonyms' not in st.session_state:
+    st.session_state.dynamic_synonyms = DEFAULT_SYNONYMS.copy()
 
 # [일반 검색 전환 변수]
 if 'last_unanswered_query' not in st.session_state:
@@ -152,7 +174,6 @@ st.markdown("""
 # ==================== 유틸리티 함수 ====================
 def format_docs(docs):
     formatted_parts = []
-    # [문서 1], [문서 2] 처럼 인덱스를 명시적으로 붙여줌
     for i, doc in enumerate(docs, 1):
         source = doc.metadata.get('source', 'Unknown')
         formatted_parts.append(f"[문서 {i}] (출처: {source})\n{doc.page_content}")
@@ -172,36 +193,92 @@ def get_date_group(created_at):
     elif diff.days <= 7: return "지난 7일"
     else: return "이전"
 
-# AI가 반환한 "1, 3, 5" 같은 문자열을 파싱해서 리스트로 변환
 def parse_used_docs(docs_str):
     try:
-        # 숫자만 추출
         nums = re.findall(r'\d+', docs_str)
         return [int(n) for n in nums]
     except:
         return []
 
-# [핵심 추가] 질문 확장(Query Expansion) 함수
-def expand_query(original_query, llm):
+# ==================== [신규] 구글 드라이브 사전 파일 읽기 함수 ====================
+def load_synonyms_from_drive(folder_id):
+    """
+    구글 드라이브의 'dictionary.txt' 파일을 찾아 읽어서 딕셔너리로 반환
+    """
+    print("드라이브 사전 동기화 시도...")
     try:
-        # Gemini에게 유사한 검색 키워드를 물어봄
-        prompt = f"""사용자의 질문을 바탕으로 사내 문서 검색에 사용할 '핵심 키워드' 2~3개를 추천해라.
-        질문의 의도를 파악해서 동의어나 관련 용어를 포함해라.
+        # 1. 인증 처리 (기존 환경 변수나 secrets 활용)
+        creds = None
+        # secrets에 gcp_service_account가 있으면 사용
+        if "gcp_service_account" in st.secrets:
+            creds = service_account.Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"],
+                scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
+        else:
+            # 로컬 환경이나 기본 인증 시도
+            creds, _ = google.auth.default()
+
+        service = build('drive', 'v3', credentials=creds)
+
+        # 2. 파일 검색 (dictionary.txt)
+        query = f"name = 'dictionary.txt' and '{folder_id}' in parents and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+
+        if not files:
+            return None, "사전 파일(dictionary.txt)을 찾을 수 없습니다."
+
+        file_id = files[0]['id']
+
+        # 3. 파일 내용 다운로드
+        request = service.files().get_media(fileId=file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+
+        # 4. 텍스트 파싱
+        content = file_io.getvalue().decode('utf-8')
+        new_synonyms = {}
         
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            key, values = line.split(':', 1)
+            # 콤마로 구분된 값들을 리스트로 변환
+            val_list = [v.strip() for v in values.split(',')]
+            new_synonyms[key.strip()] = val_list
+            
+        return new_synonyms, f"성공! {len(new_synonyms)}개의 키워드를 로드했습니다."
+
+    except Exception as e:
+        return None, f"오류 발생: {str(e)}"
+
+# ==================== 질문 확장 함수 (수정됨) ====================
+def expand_query(original_query, llm):
+    final_keywords = [original_query]
+    
+    # 1. [수정] 동적 사전 체크 (드라이브에서 불러온 값 사용)
+    current_dict = st.session_state.dynamic_synonyms
+    for key, values in current_dict.items():
+        if key in original_query:
+            final_keywords.extend(values)
+            
+    # 2. LLM 확장
+    try:
+        prompt = f"""사용자의 질문을 바탕으로 사내 문서 검색에 사용할 '핵심 키워드' 2개를 추천해라.
         질문: {original_query}
-        
-        [출력 형식]
-        키워드1, 키워드2, 키워드3 (콤마로 구분, 설명 없이 단어만 출력)
-        예: 심사료 -> 심사료, 심사비, 게재료, 투고료
-        """
+        [출력 형식] 키워드1, 키워드2 (단어만)"""
         response = llm.generate_content(prompt)
-        expanded_text = response.text.strip()
-        keywords = [k.strip() for k in expanded_text.split(',')]
-        
-        # 원본 질문도 포함
-        return [original_query] + keywords
+        ai_keywords = [k.strip() for k in response.text.strip().split(',')]
+        final_keywords.extend(ai_keywords)
     except:
-        return [original_query]
+        pass
+        
+    return list(set(final_keywords))
 
 # ==================== 사이드바 ====================
 with st.sidebar:
@@ -252,18 +329,38 @@ with st.sidebar:
         if st.session_state.admin_mode:
             st.success("관리자 모드 ON")
             fid = st.text_input("Google Drive 폴더 ID", value=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""))
-            if st.button("문서 동기화", use_container_width=True):
-                if fid:
-                    with st.spinner("동기화 중..."):
-                        try:
-                            cnt = sync_drive_to_db(fid, st.session_state.supabase_client, st.session_state.embeddings)
-                            st.success(f"{cnt}개 동기화 완료")
-                        except Exception as e: st.error(f"오류: {e}")
+            
+            col_db, col_dic = st.columns(2)
+            with col_db:
+                if st.button("문서 동기화", use_container_width=True):
+                    if fid:
+                        with st.spinner("문서 동기화 중..."):
+                            try:
+                                cnt = sync_drive_to_db(fid, st.session_state.supabase_client, st.session_state.embeddings)
+                                st.success(f"{cnt}개 완료")
+                            except Exception as e: st.error(f"오류: {e}")
+            
+            # [신규] 사전 동기화 버튼
+            with col_dic:
+                if st.button("유의어 사전 동기화", use_container_width=True):
+                    if fid:
+                        with st.spinner("dictionary.txt 읽는 중..."):
+                            new_dict, msg = load_synonyms_from_drive(fid)
+                            if new_dict:
+                                st.session_state.dynamic_synonyms = new_dict
+                                st.success(msg)
+                            else:
+                                st.warning(msg)
+
             if st.checkbox("DB 초기화 확인"):
                 if st.button("DB 삭제", type="primary", use_container_width=True):
                     with st.spinner("삭제 중..."):
                         if reset_database(st.session_state.supabase_client): st.success("완료")
                         else: st.error("실패")
+            
+            # 현재 적용된 유의어 확인 (디버깅용)
+            with st.expander("현재 적용된 유의어 확인"):
+                st.json(st.session_state.dynamic_synonyms)
 
 # ==================== 메인 화면 ====================
 curr_session = st.session_state.chat_sessions[st.session_state.current_session_id]
@@ -349,39 +446,32 @@ if user_question:
     with st.chat_message("assistant", avatar="assistant"):
         with st.spinner("관련 키워드 확장 및 문서 검색 중..."):
             try:
-                # 1. [핵심 로직] 질문 확장 (Query Expansion)
-                # 사용자의 질문을 기반으로 AI가 3개 정도의 검색 키워드를 생성함
+                # 1. 질문 확장 (동적 사전 + AI)
                 search_queries = expand_query(user_question, st.session_state.llm)
+                st.info(f"💡 확장된 검색어: {', '.join(search_queries)}")
                 
-                # 확장된 키워드로 각각 검색 수행 후 결과 합치기
+                # 2. 다각도 검색 수행
                 all_docs = []
                 all_infos = []
-                seen_contents = set() # 중복 제거용
+                seen_contents = set()
                 
                 for q in search_queries:
                     docs, infos = search_similar_documents(
                         query=q,
                         supabase_client=st.session_state.supabase_client,
                         embeddings=st.session_state.embeddings,
-                        top_k=5 # 각 키워드당 5개씩
+                        top_k=7
                     )
-                    
                     for doc, info in zip(docs, infos):
-                        # 중복 제거 (내용 기준)
                         if doc.page_content not in seen_contents:
                             seen_contents.add(doc.page_content)
                             all_docs.append(doc)
-                            # 원본 텍스트 미리 병합
                             info['content'] = doc.page_content
                             all_infos.append(info)
                 
-                # 검색 결과(source_docs, similarity_info) 최종 정리
-                # 유사도 점수 높은 순으로 정렬 (선택 사항이나 보통 검색 결과 합치면 정렬 필요)
-                # 여기서는 API에서 이미 정렬되어 오지만, 합쳤으므로 score 기준 재정렬
                 combined = list(zip(all_docs, all_infos))
                 combined.sort(key=lambda x: x[1]['score'], reverse=True)
                 
-                # 상위 15개만 자르기
                 source_docs = [x[0] for x in combined][:15]
                 similarity_info = [x[1] for x in combined][:15]
 
@@ -442,26 +532,22 @@ if user_question:
                             used_indices = parse_used_docs(docs_part)
                             clean_answer = clean_answer.strip()
                         
-                        # 답변 출력
                         if "===DETAIL_START===" in clean_answer:
                             p = clean_answer.split("===DETAIL_START===", 1)
                             st.write(p[0].strip())
                             with st.expander("상세 보기"): st.markdown(p[1].strip())
                         else: st.write(clean_answer)
 
-                        # 참고 문서 및 원본 내용 표시
                         valid_docs = []
                         for idx in used_indices:
                             if 0 <= idx-1 < len(similarity_info):
                                 valid_docs.append(similarity_info[idx-1])
                         
-                        # AI가 선택한 문서가 없거나(파싱 실패 등), 부족할 경우 유사도 상위 문서를 보여줌
                         final_docs_to_show = valid_docs if valid_docs else similarity_info[:3]
                         label = "AI가 참고한 문서 (클릭하여 원본 보기)" if valid_docs else "유사 문서 (자동 추천)"
 
                         st.markdown(f"**📂 {label} ({len(final_docs_to_show)}개)**")
                         for i, info in enumerate(final_docs_to_show, 1):
-                            # [핵심] 사용자가 유사도를 확인할 수 있도록 Score 표시
                             with st.expander(f"{i}. {info['filename']} (유사도: {info['score']:.2f})"):
                                 st.info("아래는 색인된 원본 데이터입니다.")
                                 st.text(info.get('content', '내용 없음'))
