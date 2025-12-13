@@ -1,9 +1,11 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 완결: UI 개선, 질문 확장, CSV 동의어 사전, 버그 수정 통합 버전)
+(최종 완결: 구글 인증 강제 적용 + CSV 사전 + 검색 확장 + UI 개선 통합 버전)
 """
 
 import os
+import json
+import tempfile
 import uuid
 import re
 import io
@@ -12,6 +14,28 @@ from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from pathlib import Path
+
+# ==================== [긴급 처방] 시스템 전체 인증 강제 적용 ====================
+# rag_module.py 및 기타 라이브러리가 secrets.toml의 정보를 통해 
+# 구글 드라이브에 정상 접속하도록 환경 변수를 강제로 설정합니다.
+
+if "gcp_service_account" in st.secrets:
+    try:
+        # 1. secrets에서 정보 가져오기
+        service_account_info = dict(st.secrets["gcp_service_account"])
+
+        # 2. 임시 파일 생성 (구글 라이브러리는 파일 경로를 필요로 함)
+        # delete=False로 설정하여 앱 실행 동안 파일이 유지되도록 함
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8') as temp:
+            json.dump(service_account_info, temp)
+            temp_path = temp.name
+
+        # 3. 환경 변수 설정 (이제 모든 구글 관련 코드는 이 파일을 봅니다)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+        
+    except Exception as e:
+        st.error(f"인증 파일 생성 중 오류 발생: {e}")
+# ==============================================================================
 
 # 구글 드라이브 API 관련 임포트
 try:
@@ -205,14 +229,8 @@ def load_synonyms_from_drive(folder_id):
     """
     print("드라이브 사전 동기화 시도 (CSV)...")
     try:
-        creds = None
-        if "gcp_service_account" in st.secrets:
-            creds = service_account.Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"],
-                scopes=['https://www.googleapis.com/auth/drive.readonly']
-            )
-        else:
-            creds, _ = google.auth.default()
+        # 이미 최상단에서 환경변수 설정을 마쳤으므로 default()만 호출하면 됨
+        creds, _ = google.auth.default()
 
         service = build('drive', 'v3', credentials=creds)
 
@@ -343,7 +361,7 @@ with st.sidebar:
                     if fid:
                         with st.spinner("문서 동기화 중..."):
                             try:
-                                # [수정 완료] 인자 2개로 호출
+                                # [수정 완료] 인자 2개 호출
                                 cnt = sync_drive_to_db(fid, st.session_state.supabase_client)
                                 st.success(f"{cnt}개 완료")
                             except Exception as e: st.error(f"오류: {e}")
