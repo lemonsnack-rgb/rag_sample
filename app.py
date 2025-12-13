@@ -1,6 +1,6 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 완결: 구글 인증 강제 적용 + CSV 사전 + 검색 확장 + UI 개선 통합 버전)
+(최종 완결: 상세 답변의 완결성(Professionalism) 강화 + 가독성 + 구글 인증 + PDF 디버깅 통합)
 """
 
 import os
@@ -16,28 +16,18 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 # ==================== [긴급 처방] 시스템 전체 인증 강제 적용 ====================
-# rag_module.py 및 기타 라이브러리가 secrets.toml의 정보를 통해 
-# 구글 드라이브에 정상 접속하도록 환경 변수를 강제로 설정합니다.
-
 if "gcp_service_account" in st.secrets:
     try:
-        # 1. secrets에서 정보 가져오기
         service_account_info = dict(st.secrets["gcp_service_account"])
-
-        # 2. 임시 파일 생성 (구글 라이브러리는 파일 경로를 필요로 함)
-        # delete=False로 설정하여 앱 실행 동안 파일이 유지되도록 함
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8') as temp:
             json.dump(service_account_info, temp)
             temp_path = temp.name
-
-        # 3. 환경 변수 설정 (이제 모든 구글 관련 코드는 이 파일을 봅니다)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
-        
     except Exception as e:
         st.error(f"인증 파일 생성 중 오류 발생: {e}")
 # ==============================================================================
 
-# 구글 드라이브 API 관련 임포트
+# 라이브러리 임포트
 try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
@@ -47,7 +37,6 @@ except ImportError:
     st.error("Google API 라이브러리가 필요합니다. requirements.txt를 확인하세요.")
     st.stop()
 
-# RAG 모듈 임포트
 try:
     from rag_module import init_vector_store, sync_drive_to_db, search_similar_documents, get_indexed_documents, reset_database
 except ImportError:
@@ -148,7 +137,7 @@ st.markdown("""
     .block-container {
         max-width: 900px !important;
         padding-top: 3rem;
-        padding-bottom: 20rem; /* 하단 여백 확보 */
+        padding-bottom: 20rem;
         margin: 0 auto;
     }
 
@@ -224,14 +213,9 @@ def parse_used_docs(docs_str):
 
 # ==================== CSV 파일 읽기 함수 ====================
 def load_synonyms_from_drive(folder_id):
-    """
-    구글 드라이브의 'dictionary.csv' 파일을 찾아 읽어서 딕셔너리로 반환
-    """
     print("드라이브 사전 동기화 시도 (CSV)...")
     try:
-        # 이미 최상단에서 환경변수 설정을 마쳤으므로 default()만 호출하면 됨
         creds, _ = google.auth.default()
-
         service = build('drive', 'v3', credentials=creds)
 
         query = f"name = 'dictionary.csv' and '{folder_id}' in parents and trashed = false"
@@ -242,7 +226,6 @@ def load_synonyms_from_drive(folder_id):
             return None, "사전 파일(dictionary.csv)을 찾을 수 없습니다."
 
         file_id = files[0]['id']
-
         request = service.files().get_media(fileId=file_id)
         file_io = io.BytesIO()
         downloader = MediaIoBaseDownload(file_io, request)
@@ -251,29 +234,23 @@ def load_synonyms_from_drive(folder_id):
             status, done = downloader.next_chunk()
 
         content_bytes = file_io.getvalue()
-        
         try:
             content_str = content_bytes.decode('utf-8')
         except UnicodeDecodeError:
             try:
                 content_str = content_bytes.decode('cp949')
             except UnicodeDecodeError:
-                return None, "CSV 파일 인코딩을 인식할 수 없습니다. (UTF-8 또는 CP949 권장)"
+                return None, "CSV 파일 인코딩 오류 (UTF-8/CP949)"
 
         new_synonyms = {}
         f = io.StringIO(content_str)
         reader = csv.reader(f)
         
         for row in reader:
-            if len(row) < 2:
-                continue
-            
+            if len(row) < 2: continue
             key = row[0].strip()
-            synonym_str = row[1].strip()
-            synonym_str = synonym_str.replace('|', ',')
-            
+            synonym_str = row[1].strip().replace('|', ',')
             val_list = [v.strip() for v in synonym_str.split(',') if v.strip()]
-            
             if key and val_list:
                 new_synonyms[key] = val_list
             
@@ -285,14 +262,11 @@ def load_synonyms_from_drive(folder_id):
 # ==================== 질문 확장 함수 ====================
 def expand_query(original_query, llm):
     final_keywords = [original_query]
-    
-    # 1. 동적 사전 체크
     current_dict = st.session_state.dynamic_synonyms
     for key, values in current_dict.items():
         if key in original_query:
             final_keywords.extend(values)
             
-    # 2. LLM 확장
     try:
         prompt = f"""사용자의 질문을 바탕으로 사내 문서 검색에 사용할 '핵심 키워드' 2개를 추천해라.
         질문: {original_query}
@@ -340,7 +314,8 @@ with st.sidebar:
     
     st.divider()
     
-    with st.expander("설정"):
+    # [관리자 패널]
+    with st.expander("설정 (관리자)"):
         st.markdown("**관리자 접근**")
         apw = st.text_input("비밀번호", type="password", key="admin_password")
         correct_pw = st.secrets.get("ADMIN_PASSWORD", "admin")
@@ -355,13 +330,30 @@ with st.sidebar:
             st.success("관리자 모드 ON")
             fid = st.text_input("Google Drive 폴더 ID", value=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""))
             
+            # [디버깅] 파일 목록 조회
+            if st.button("📁 폴더 내 파일 확인 (디버깅)", use_container_width=True):
+                if fid:
+                    with st.spinner("파일 목록 조회 중..."):
+                        try:
+                            creds, _ = google.auth.default()
+                            service = build('drive', 'v3', credentials=creds)
+                            results = service.files().list(
+                                q=f"'{fid}' in parents and trashed = false",
+                                fields="files(id, name, mimeType)"
+                            ).execute()
+                            files = results.get('files', [])
+                            st.info(f"총 {len(files)}개의 파일이 감지됨")
+                            for f in files:
+                                st.text(f"- {f['name']} ({f['mimeType']})")
+                        except Exception as e:
+                            st.error(f"조회 실패: {e}")
+
             col_db, col_dic = st.columns(2)
             with col_db:
                 if st.button("문서 동기화", use_container_width=True):
                     if fid:
                         with st.spinner("문서 동기화 중..."):
                             try:
-                                # [수정 완료] 인자 2개 호출
                                 cnt = sync_drive_to_db(fid, st.session_state.supabase_client)
                                 st.success(f"{cnt}개 완료")
                             except Exception as e: st.error(f"오류: {e}")
@@ -506,6 +498,9 @@ if user_question:
                 else:
                     context = format_docs(source_docs)
                     if st.session_state.llm:
+                        # ============================================
+                        # [핵심] 프롬프트 수정: 내용 완결성을 최우선으로 지시
+                        # ============================================
                         prompt = f"""너는 사내 규정 전문가다. 아래 [Context]를 읽고 질문에 답해라.
 
 [Context]:
@@ -516,7 +511,9 @@ if user_question:
 [지침]
 1. [Context]에 답이 없으면 `[NO_CONTENT]` 라고만 출력해라.
 2. [핵심 요약]은 **반드시 불릿포인트(- )를 사용하여 명사형 종결(개조식)로 요약**해라.
-3. [상세 내용]은 **문서의 내용을 빠짐없이 전문적이고 구체적으로 작성**해라. (어조는 정중하게)
+3. [상세 내용] 작성 시 다음 **대원칙**을 반드시 준수해라:
+   - **제 1원칙 (내용의 완결성):** 문서의 내용을 **절대 생략하지 말고**, 전문적이고 구체적으로 빠짐없이 작성해라. 단순 요약이 아니라, 실무자가 보고 바로 업무에 적용할 수 있을 정도로 상세해야 한다.
+   - **제 2원칙 (가독성):** 위 내용을 작성할 때, 읽기 편하도록 **### 소제목**과 **문단 간 빈 줄**을 사용하여 구조화해라.
 4. 마지막에 참고한 문서 번호를 적어라.
 
 답변형식:
@@ -524,7 +521,12 @@ if user_question:
 - 핵심 내용 1
 - 핵심 내용 2
 ===DETAIL_START===
-(전문적이고 상세한 내용)
+### 소제목 (예: 적용 범위)
+(빈 줄)
+내용 상세 기술...
+(빈 줄)
+### 소제목 (예: 지급 기준)
+내용 상세 기술...
 ===DOCS: 번호, 번호===
 또는
 [NO_CONTENT]
