@@ -256,9 +256,16 @@ with st.sidebar:
 
             st.divider()
             if st.button("🗑️ DB 전체 삭제", type="primary"):
-                if reset_database(st.session_state.supabase_client):
-                    st.success("삭제 완료")
-                st.warning("⚠️ 재색인을 위해 '문서 동기화' 버튼을 클릭하세요")
+                with st.spinner("DB 삭제 중..."):
+                    try:
+                        success = reset_database(st.session_state.supabase_client)
+                        if success:
+                            st.success("✅ DB 삭제 완료!")
+                            st.warning("⚠️ 재색인을 위해 '문서 동기화' 버튼을 클릭하세요")
+                        else:
+                            st.error("❌ DB 삭제 실패. 로그를 확인하세요.")
+                    except Exception as e:
+                        st.error(f"❌ DB 삭제 오류: {e}")
 
 # ==================== [6. 메인 화면 로직] ====================
 curr_session = st.session_state.chat_sessions[st.session_state.current_session_id]

@@ -458,20 +458,46 @@ def get_indexed_documents(client):
 def reset_database(client):
     """
     Supabase DB의 documents 테이블 전체를 삭제합니다. (강제 초기화)
+
+    개선된 삭제 방법:
+    1. 먼저 전체 문서 개수 확인
+    2. 배치 단위로 삭제 (Supabase 제한 고려)
+    3. 삭제 후 재확인
     """
     if client is None:
         print("Error: Supabase 클라이언트가 유효하지 않습니다.")
         return False
 
     try:
-        result = client.table("documents").delete().neq("id", 0).execute()
+        # 1. 삭제 전 문서 개수 확인
+        count_before = client.table("documents").select("id", count="exact").execute()
+        total_docs = count_before.count if hasattr(count_before, 'count') else 0
+        print(f"삭제 전 문서 개수: {total_docs}")
 
-        if result.data == []:
-             print("DB 삭제 성공")
-             return True
+        if total_docs == 0:
+            print("이미 빈 DB입니다.")
+            return True
+
+        # 2. 전체 삭제 실행 (neq 조건으로 모든 행 삭제)
+        # Supabase는 id가 UUID이므로 gte('id', '00000000-0000-0000-0000-000000000000') 사용
+        result = client.table("documents").delete().gte("id", "00000000-0000-0000-0000-000000000000").execute()
+
+        print(f"삭제 실행 완료. 응답: {result}")
+
+        # 3. 삭제 후 재확인
+        count_after = client.table("documents").select("id", count="exact").execute()
+        remaining_docs = count_after.count if hasattr(count_after, 'count') else 0
+        print(f"삭제 후 남은 문서: {remaining_docs}")
+
+        if remaining_docs == 0:
+            print(f"✅ DB 삭제 성공: {total_docs}개 문서 삭제됨")
+            return True
         else:
-             print(f"DB 삭제 시도 응답에 데이터가 남아있음: {result.data}")
-             return False
+            print(f"⚠️ 완전 삭제 실패: {remaining_docs}개 문서 남음")
+            return False
+
     except Exception as e:
         print(f"DB Reset Error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
