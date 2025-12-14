@@ -296,6 +296,17 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
         db_file_times = get_file_timestamps_from_db(supabase_client)
         drive_file_names = {f['name'] for f in files}
 
+        # 🔍 디버그 정보 (화면 표시)
+        st.caption(f"🔍 DEBUG: DB에서 조회된 파일 수 = {len(db_file_times)}")
+        if len(db_file_times) > 0:
+            sample_file = list(db_file_times.keys())[0]
+            st.caption(f"🔍 DEBUG: 샘플 DB = {sample_file[:30]}... = {db_file_times[sample_file]}")
+
+        # 샘플 Drive 파일도 표시
+        if len(files) > 0:
+            sample_drive = files[0]
+            st.caption(f"🔍 DEBUG: 샘플 Drive = {sample_drive['name'][:30]}... = {sample_drive.get('modifiedTime', 'N/A')}")
+
         new_count = 0
         updated_count = 0
         unchanged_count = 0
@@ -308,10 +319,16 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 # 새 파일
                 files_to_process.append(f)
                 new_count += 1
+                if new_count <= 3:  # 처음 3개만 화면에 표시
+                    st.caption(f"  🆕 새 파일: {fname[:40]}...")
             elif drive_modified > db_file_times[fname]:
                 # 수정된 파일
                 files_to_process.append(f)
                 updated_count += 1
+                if updated_count <= 3:  # 처음 3개만 화면에 표시
+                    st.caption(f"  🔄 수정됨: {fname[:40]}...")
+                    st.caption(f"    Drive: {drive_modified}")
+                    st.caption(f"    DB:    {db_file_times[fname]}")
             else:
                 # 변경 없음
                 unchanged_count += 1
