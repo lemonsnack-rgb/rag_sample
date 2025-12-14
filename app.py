@@ -1,6 +1,6 @@
 """
 중소기업 업무 자동화 RAG 솔루션 - WorkAnswer
-(최종 마스터 코드: 프롬프트 맥락 주입 및 상세 내용 길이 강제 포함)
+(최종 마스터 코드: 기업 전문가 답변 품질 최적화)
 """
 import os
 import json
@@ -12,6 +12,7 @@ import csv
 from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
+from pathlib import Path
 
 # ==================== [1. 시스템 인증 및 라이브러리 설정] ====================
 if "gcp_service_account" in st.secrets:
@@ -34,7 +35,7 @@ try:
     from rag_module import init_vector_store, sync_drive_to_db, search_similar_documents, get_indexed_documents, reset_database
 except Exception as e: st.error(f"🚨 rag_module.py 로딩 실패! 원인: {e}"); st.stop()
 
-# 🌟 기본 동의어 사전 (최종 확인) 🌟
+# 🌟🌟🌟 기본 동의어 사전 (최종 확인 및 복구) 🌟🌟🌟
 DEFAULT_SYNONYMS = {
     "심사료": ["게재료", "투고료", "논문 게재", "학회비", "논문 심사료"],
     "인건비": ["노무비", "인력운영비", "학생 인건비"]
@@ -228,12 +229,16 @@ else:
         st.chat_message("user").write(q)
         with st.chat_message("assistant"):
             if "===DETAIL_START===" in a:
+                # [핵심 결론] 섹션 출력
                 parts = a.split("===DETAIL_START===")
                 st.write(parts[0].strip())
+                
+                # [상세 규정 해설] 섹션 출력 (Expander 내부)
                 if len(parts) > 1:
                     detail_part = parts[1].split("===DOCS:")[0]
                     with st.expander("상세 내용 보기"):
                         st.markdown(detail_part.strip())
+            
             elif "[NO_CONTENT]" in a:
                 st.write("문서 내용을 분석했으나, 질문에 대한 정확한 답변을 찾을 수 없습니다.")
             else:
@@ -297,8 +302,10 @@ if query := st.chat_input("질문을 입력하세요..."):
                 else:
                     context_text = format_docs([x[0] for x in combined])
                     
-                    # 🌟🌟🌟 [프롬프트 최종 마스터] - 맥락 주입 및 내용 충실성 강화 🌟🌟🌟
-                    main_source = combined[0][0].metadata.get('source', '문서')
+                    # 🌟🌟🌟 [프롬프트 최종 마스터] - 소제목 서식 및 다수 출처 통합 반영 🌟🌟🌟
+                    # 참고 문서 목록 생성 (출처 명시를 위해 사용)
+                    source_list = list(set([x[0].metadata.get('source', '문서') for x in combined]))
+                    main_source = "여러 참고 문서" if len(source_list) > 1 else source_list[0]
                     
                     prompt = f"""
                     너는 **{main_source}**에 근거하여 답변하는 유능한 사내 규정 전문가이다. 
@@ -307,27 +314,29 @@ if query := st.chat_input("질문을 입력하세요..."):
                     [Context]:
                     {context_text}
                     
+                    [지침]
+                    1. **존칭/서두 금지:** '존경하는 직원 여러분께,' '안녕하세요,' 등의 불필요한 서두나 존칭을 절대 사용하지 마라. 답변은 중립적이고 건조한 전문가의 어조를 유지해라.
+                    2. **내용의 완결성 및 전문성 (최우선):** Context의 내용을 절대 생략하지 말고, 구체적인 수치, 조건, 예외사항을 빠짐없이 포함하여 전문적으로 상세하게 작성해라. **답변의 주체가 {main_source}에 따른 것임을 명확히 언급**해라.
+                    3. **다수 출처 통합 (필수):** Context에 여러 문서가 혼합되어 있다면, **[상세 규정 해설]** 섹션에서 내용이 섞이지 않도록 **출처별로 명확히 구분**하여 설명해라. (예: '**[규정 A 기반 해설]**'과 같이 볼드체 헤더 사용)
+                    4. **[핵심 결론] 섹션 형식 (강제):** - **반드시** '**[핵심 결론]**'으로 시작하고, 글머리 기호(- )와 **명사형 종결**의 개조식 문장으로만 작성해라.
+                    5. **[상세 규정 해설] 섹션 형식:**
+                       - 2, 3번 지침을 따라 Context의 내용을 상세하고 충분하게 작성하여 **핵심 결론보다 훨씬 길어야 한다.**
+                       - **서식:** 내용 구조화를 위해 **소제목은 일반 폰트 크기의 볼드체(`**소제목**`)**만 사용하고, 문단 간 빈 줄을 사용해라. 중요한 키워드는 **볼드체**로 강조해라. 표 데이터는 **마크다운 표**로 정리해라.
+                    6. 답이 없으면 `[NO_CONTENT]` 라고만 써라.
+                    
                     질문: {query}
                     
-                    [지침]
-                    1. **내용의 충실성 및 전문성 (최우선):** Context의 내용을 절대 생략하지 말고, 구체적인 수치, 조건, 예외사항을 빠짐없이 포함하여 전문적으로 상세하게 작성해라. **답변의 주체가 {main_source}에 따른 것임을 명확히 언급**해라.
-                    2. **[핵심 요약] 섹션 형식 (강제):** - **반드시** 글머리 기호(- )와 **명사형 종결**의 개조식 문장으로만 작성해라.
-                    3. **[상세 내용] 섹션 형식:**
-                       - 1번 지침을 따라 Context의 내용을 상세하고 충분하게 작성하여 **요약보다 길어야 한다.**
-                       - **서식:** 내용 구조화를 위해 **### 소제목**과 **문단 간 빈 줄**을 사용해라. 중요한 키워드는 **볼드체**로 강조해라. 표 데이터는 **마크다운 표**로 정리해라.
-                    4. 답이 없으면 `[NO_CONTENT]` 라고만 써라.
-                    
                     답변형식:
-                    [핵심 요약]
-                    - 요약1
-                    - 요약2
+                    [핵심 결론]
+                    - 결론 1
+                    - 결론 2
                     ===DETAIL_START===
-                    ### 상세 내용의 소제목
-                    내용 기술...
+                    **상세 규정 해설 소제목 (예: 적용 범위 및 조건)**
+                    내용 상세 기술...
                     (반드시 빈 줄)
-                    ### 다음 소제목
-                    내용 기술...
-                    ===DOCS: 문서번호===
+                    **다음 소제목 (예: 유의사항)**
+                    내용 상세 기술...
+                    ===DOCS: 참고한 문서 번호===
                     """
                     
                     if st.session_state.llm:
@@ -354,6 +363,7 @@ if query := st.chat_input("질문을 입력하세요..."):
                             # 원문 상세 보기
                             st.markdown("---")
                             st.caption("🔍 참고 문서 (클릭하여 원문 확인)")
+                            # 상위 5개 문서만 표시
                             for i, info in enumerate([x[1] for x in combined][:5], 1):
                                 with st.expander(f"{i}. {info['filename']} (관련도: {info['score']:.2f})"):
                                     st.info("💡 문서 원문:")
