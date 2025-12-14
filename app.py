@@ -341,24 +341,31 @@ if query := st.chat_input("질문을 입력하세요..."):
 
                 all_docs, all_infos, seen_hashes = [], [], set()
 
-                for q in search_queries:
+                # 🔧 개선: 원본 쿼리 가중치 3배 (확장 키워드 부작용 방지)
+                for idx, q in enumerate(search_queries):
                     if st.session_state.supabase_client:
                         docs, infos = search_similar_documents(
                             q,
                             st.session_state.supabase_client,
                             st.session_state.embeddings,
-                            top_k=10,  # 🔧 5 → 10으로 증가 (더 많은 후보 검색)
+                            top_k=10,
                             dynamic_threshold=True
                         )
+
+                        # 원본 쿼리(idx=0)는 가중치 3배
+                        weight_multiplier = 3.0 if idx == 0 else 1.0
+
                         for d, i in zip(docs, infos):
-                            # 개선된 중복 제거: 정규화 후 해시 비교
                             normalized = re.sub(r'\s+', '', d.page_content)
                             content_hash = hash(normalized)
 
                             if content_hash not in seen_hashes:
                                 seen_hashes.add(content_hash)
                                 all_docs.append(d)
-                                all_infos.append(i)
+                                # 가중치 적용된 점수
+                                weighted_info = i.copy()
+                                weighted_info['score'] = i['score'] * weight_multiplier
+                                all_infos.append(weighted_info)
 
                 # 점수 기준 정렬 및 상위 15개 선택
                 combined = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)[:15]

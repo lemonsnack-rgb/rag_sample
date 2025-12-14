@@ -69,7 +69,9 @@ def preprocess_text_with_section_headers(text):
                     "section": current_section
                 })
                 current_chunk_lines = []
-            current_section = stripped_line
+
+            # 🔧 개선: 섹션명을 첫 100자로 제한 (긴 제목 방지)
+            current_section = stripped_line[:100] if len(stripped_line) > 100 else stripped_line
             current_chunk_lines.append(stripped_line)
         else:
             # 순수 내용만 저장 (태그 없이)
