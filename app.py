@@ -129,23 +129,36 @@ def load_synonyms_from_drive(folder_id):
     except Exception as e: return None, str(e)
 
 def expand_query(original_query, llm):
-    final = [original_query]
-    # 1. 사전 기반 (필수 확장)
-    for k, v in st.session_state.dynamic_synonyms.items():
-        if k in original_query: 
-            final.extend(v)
-        elif any(word in original_query for word in v):
-             final.append(k)
+    """
+    개선된 쿼리 확장 함수 - 완전 단어 매칭 사용
 
-    # 2. LLM 기반 (선택적 확장)
+    개선사항:
+    - 부분 문자열 매칭 → 완전 단어 경계 매칭으로 변경
+    - 노이즈 감소 및 검색 정확도 향상
+    """
+    final = [original_query]
+
+    # 1. 사전 기반 확장 (완전 단어 매칭)
+    for k, v in st.session_state.dynamic_synonyms.items():
+        # 순방향: 주요 용어가 쿼리에 있으면 동의어 추가
+        if re.search(rf'\b{re.escape(k)}\b', original_query):
+            final.extend(v)
+        # 역방향: 동의어가 쿼리에 있으면 주요 용어 추가
+        elif any(re.search(rf'\b{re.escape(word)}\b', original_query) for word in v):
+            final.append(k)
+
+    # 2. LLM 기반 확장 (선택적)
     try:
         if llm:
             prompt = f"질문 '{original_query}'의 검색 키워드 2개만 추천해줘 (단어만, 쉼표로 구분)"
             res = llm.generate_content(prompt)
             final.extend([k.strip() for k in res.text.split(',') if k.strip()])
-    except: pass
-    
-    return list(set(final))
+    except:
+        pass
+
+    # 중복 제거하되 원본 쿼리는 첫 번째로 유지
+    unique_terms = [original_query] + [term for term in final[1:] if term not in final[:final.index(term) + 1]]
+    return unique_terms[:7]  # 최대 7개로 제한하여 노이즈 방지
 
 # ==================== [5. 사이드바] ====================
 with st.sidebar:
@@ -194,17 +207,58 @@ with st.sidebar:
                 except Exception as e: st.error(f"에러: {e}")
 
             c1, c2 = st.columns(2)
+            force_update = st.checkbox("기존 문서 덮어쓰기 (중복 방지)", value=True)
+
             if c1.button("문서 동기화"):
                 try:
-                    cnt = sync_drive_to_db(fid, st.session_state.supabase_client)
+                    cnt = sync_drive_to_db(fid, st.session_state.supabase_client, force_update=force_update)
                     st.success(f"{cnt}개 완료")
                 except Exception as e: st.error(f"실패: {e}")
+
             if c2.button("사전 동기화"):
                 d, m = load_synonyms_from_drive(fid)
                 if d: st.session_state.dynamic_synonyms = d; st.success(m)
                 else: st.warning(m)
-            if st.button("DB 삭제", type="primary"):
-                if reset_database(st.session_state.supabase_client): st.success("삭제 완료")
+
+            # 색인된 문서 목록 조회
+            if st.button("색인된 문서 확인"):
+                try:
+                    docs = get_indexed_documents(st.session_state.supabase_client)
+                    st.info(f"📚 총 {len(docs)}개 파일 색인됨")
+                    for doc in sorted(docs):
+                        st.text(f"- {doc}")
+                except Exception as e:
+                    st.error(f"조회 실패: {e}")
+
+            # 검색 품질 테스트 도구
+            with st.expander("🔍 검색 품질 테스트"):
+                test_query = st.text_input("테스트 쿼리", "인건비 지급 규정")
+                if st.button("검색 테스트 실행"):
+                    try:
+                        docs, infos = search_similar_documents(
+                            test_query,
+                            st.session_state.supabase_client,
+                            st.session_state.embeddings,
+                            top_k=20
+                        )
+                        st.write(f"### 검색 결과 ({len(infos)}개)")
+                        for i, info in enumerate(infos, 1):
+                            score = info['score']
+                            if score > 0.7:
+                                emoji = "🟢"
+                            elif score > 0.5:
+                                emoji = "🟡"
+                            else:
+                                emoji = "🔴"
+                            st.write(f"{emoji} {i}. {info['filename']} - **{score:.3f}** (섹션: {info.get('section', 'N/A')})")
+                    except Exception as e:
+                        st.error(f"테스트 실패: {e}")
+
+            st.divider()
+            if st.button("🗑️ DB 전체 삭제", type="primary"):
+                if reset_database(st.session_state.supabase_client):
+                    st.success("삭제 완료")
+                st.warning("⚠️ 재색인을 위해 '문서 동기화' 버튼을 클릭하세요")
 
 # ==================== [6. 메인 화면 로직] ====================
 curr_session = st.session_state.chat_sessions[st.session_state.current_session_id]
@@ -276,20 +330,36 @@ if query := st.chat_input("질문을 입력하세요..."):
         with st.spinner("분석 중..."):
             try:
                 search_queries = expand_query(query, st.session_state.llm)
-                st.caption(f"💡 키워드: {', '.join(search_queries)}")
-                
-                all_docs, all_infos, seen = [], [], set()
-                
+                st.caption(f"💡 확장 키워드 ({len(search_queries)}개): {', '.join(search_queries)}")
+
+                all_docs, all_infos, seen_hashes = [], [], set()
+
                 for q in search_queries:
                     if st.session_state.supabase_client:
-                        docs, infos = search_similar_documents(q, st.session_state.supabase_client, st.session_state.embeddings)
+                        docs, infos = search_similar_documents(
+                            q,
+                            st.session_state.supabase_client,
+                            st.session_state.embeddings,
+                            top_k=5,
+                            dynamic_threshold=True
+                        )
                         for d, i in zip(docs, infos):
-                            if d.page_content not in seen:
-                                seen.add(d.page_content)
+                            # 개선된 중복 제거: 정규화 후 해시 비교
+                            normalized = re.sub(r'\s+', '', d.page_content)
+                            content_hash = hash(normalized)
+
+                            if content_hash not in seen_hashes:
+                                seen_hashes.add(content_hash)
                                 all_docs.append(d)
                                 all_infos.append(i)
-                
+
+                # 점수 기준 정렬 및 상위 15개 선택
                 combined = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)[:15]
+
+                # 검색 결과 통계 표시
+                if combined:
+                    avg_score = sum(x[1]['score'] for x in combined) / len(combined)
+                    st.caption(f"📊 검색 결과: {len(combined)}개 문서, 평균 관련도: {avg_score:.2f}")
                 
                 # 결과 없음 처리 (검색 결과 0건)
                 if not combined:
@@ -303,9 +373,18 @@ if query := st.chat_input("질문을 입력하세요..."):
                     context_text = format_docs([x[0] for x in combined])
                     
                     # 🌟🌟🌟 [프롬프트 최종 마스터] - 소제목 서식 및 다수 출처 통합 반영 🌟🌟🌟
-                    # 참고 문서 목록 생성 (출처 명시를 위해 사용)
-                    source_list = list(set([x[0].metadata.get('source', '문서') for x in combined]))
-                    main_source = "여러 참고 문서" if len(source_list) > 1 else source_list[0]
+                    # 참고 문서 목록 생성 (출처 명시를 위해 사용) - 안전한 메타데이터 추출
+                    try:
+                        source_list = []
+                        for x in combined:
+                            if x and len(x) > 0 and hasattr(x[0], 'metadata'):
+                                source = x[0].metadata.get('source', '문서')
+                                if source not in source_list:
+                                    source_list.append(source)
+                        main_source = "여러 참고 문서" if len(source_list) > 1 else (source_list[0] if source_list else "문서")
+                    except Exception as e:
+                        st.warning(f"출처 추출 오류: {e}")
+                        main_source = "문서"
                     
                     prompt = f"""
                     너는 **{main_source}**에 근거하여 답변하는 유능한 사내 규정 전문가이다. 
