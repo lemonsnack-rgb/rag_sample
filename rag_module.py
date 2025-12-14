@@ -430,18 +430,16 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                     if sub_chunk.strip():
                         section_name = chunk_data["section"]
 
-                        # 🔧 개선: 섹션 정보를 page_content에도 포함하여 임베딩 품질 향상
-                        # "일반" 섹션이 아니면 섹션명을 본문 앞에 추가
-                        if section_name and section_name != "일반":
-                            enhanced_content = f"[{section_name}] {sub_chunk}"
-                        else:
-                            enhanced_content = sub_chunk
-
+                        # 🔧 개선: 섹션 태그 제거 - 순수 내용만 임베딩
+                        # 이유:
+                        # 1. 임베딩 토큰 100% 활용 (섹션 태그 오버헤드 제거)
+                        # 2. 검색 노이즈 감소
+                        # 3. "제5조" 등은 본문에 이미 포함되어 있어 검색 가능
                         docs.append(Document(
-                            page_content=enhanced_content,  # 섹션 정보 포함
+                            page_content=sub_chunk,  # 순수 내용만 (섹션 태그 없음)
                             metadata={
                                 "source": fname,
-                                "section": section_name,  # 메타데이터에도 유지
+                                "section": section_name,  # 메타데이터에는 유지 (참고용)
                                 "file_type": ext,
                                 "last_modified": drive_modified,
                                 "created_at": datetime.now().isoformat()
