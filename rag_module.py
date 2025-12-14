@@ -181,15 +181,21 @@ def extract_text_from_image(fh):
 
 # ==================== [파일 포맷별 최적 청크 크기] ====================
 def get_optimal_splitter(file_type):
-    """파일 타입에 따라 최적화된 청크 크기 반환"""
+    """
+    파일 타입에 따라 최적화된 청크 크기 반환
+
+    개선: 청크 크기 대폭 증가로 임베딩 품질 향상
+    - 더 많은 문맥 정보 → 더 정확한 의미 임베딩
+    - 검색 정확도 향상
+    """
     if file_type == 'xlsx':
-        return RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        return RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)  # 500 → 1500
     elif file_type == 'pptx':
-        return RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=100)
+        return RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)  # 1500 → 2000
     elif file_type == 'csv':
-        return RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        return RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)  # 500 → 1500
     else:
-        return RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        return RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)  # 1000 → 2000
 
 # ==================== [핵심 로직: Supabase 연결 및 동기화] ====================
 
@@ -419,20 +425,29 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
             # 파일 타입별 최적 청크 크기
             splitter = get_optimal_splitter(ext)
 
-            # 문서 생성 (섹션 정보를 메타데이터로)
+            # 문서 생성 (섹션 정보를 메타데이터 + 본문에 포함)
             docs = []
             for chunk_data in processed_chunks:
                 # 추가 청크 분할
                 sub_chunks = splitter.split_text(chunk_data["content"])
                 for sub_chunk in sub_chunks:
                     if sub_chunk.strip():
+                        section_name = chunk_data["section"]
+
+                        # 🔧 개선: 섹션 정보를 page_content에도 포함하여 임베딩 품질 향상
+                        # "일반" 섹션이 아니면 섹션명을 본문 앞에 추가
+                        if section_name and section_name != "일반":
+                            enhanced_content = f"[{section_name}] {sub_chunk}"
+                        else:
+                            enhanced_content = sub_chunk
+
                         docs.append(Document(
-                            page_content=sub_chunk,  # 순수 내용만
+                            page_content=enhanced_content,  # 섹션 정보 포함
                             metadata={
                                 "source": fname,
-                                "section": chunk_data["section"],  # 섹션은 메타데이터에
+                                "section": section_name,  # 메타데이터에도 유지
                                 "file_type": ext,
-                                "last_modified": drive_modified,  # 🆕 Drive의 수정 시간 저장
+                                "last_modified": drive_modified,
                                 "created_at": datetime.now().isoformat()
                             }
                         ))
@@ -525,26 +540,30 @@ def search_similar_documents(query, client, embeddings, top_k=5, dynamic_thresho
         embeddings: 임베딩 모델
         top_k: 반환할 문서 개수
         dynamic_threshold: True일 경우 동적 임계값 사용
+
+    개선사항:
+        - 임계값 대폭 낮춤: 0.5 → 0.3, 0.15 → 0.1
+        - 더 많은 관련 문서 검색 가능
     """
     if dynamic_threshold:
-        # 먼저 높은 임계값으로 검색
+        # 먼저 중간 임계값으로 검색 (0.5 → 0.3)
         docs_high, infos_high = search_similar_documents_with_retry(
-            query, client, embeddings, top_k=top_k, threshold=0.5
+            query, client, embeddings, top_k=top_k, threshold=0.3  # 🔧 0.5 → 0.3
         )
 
-        # 결과가 충분하면 반환
-        if len(docs_high) >= 3:
+        # 결과가 충분하면 반환 (3개 → 5개로 상향)
+        if len(docs_high) >= 5:  # 🔧 3 → 5
             return docs_high, infos_high
 
-        # 결과 부족 시 낮은 임계값으로 재검색
+        # 결과 부족 시 낮은 임계값으로 재검색 (0.15 → 0.1)
         docs_low, infos_low = search_similar_documents_with_retry(
-            query, client, embeddings, top_k=top_k, threshold=0.15
+            query, client, embeddings, top_k=top_k, threshold=0.1  # 🔧 0.15 → 0.1
         )
         return docs_low, infos_low
     else:
-        # 고정 임계값 사용
+        # 고정 임계값 사용 (0.15 → 0.1)
         return search_similar_documents_with_retry(
-            query, client, embeddings, top_k=top_k, threshold=0.15
+            query, client, embeddings, top_k=top_k, threshold=0.1  # 🔧 0.15 → 0.1
         )
 
 def get_indexed_documents(client):

@@ -347,7 +347,7 @@ if query := st.chat_input("질문을 입력하세요..."):
                             q,
                             st.session_state.supabase_client,
                             st.session_state.embeddings,
-                            top_k=5,
+                            top_k=10,  # 🔧 5 → 10으로 증가 (더 많은 후보 검색)
                             dynamic_threshold=True
                         )
                         for d, i in zip(docs, infos):
