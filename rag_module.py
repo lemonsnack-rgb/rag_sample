@@ -232,11 +232,39 @@ def delete_document_by_source(client, source_name):
         print(f"❌ {source_name} 삭제 실패: {e}")
         return False
 
+def get_file_timestamps_from_db(supabase_client):
+    """
+    DB에 저장된 파일별 마지막 수정 시간을 조회합니다.
+
+    Returns:
+        dict: {filename: last_modified_timestamp}
+    """
+    try:
+        # documents 테이블에서 파일별 최신 last_modified 조회
+        result = supabase_client.table("documents").select("metadata").execute()
+
+        file_times = {}
+        for doc in result.data:
+            metadata = doc.get('metadata', {})
+            source = metadata.get('source')
+            last_modified = metadata.get('last_modified')
+
+            if source and last_modified:
+                # 같은 파일의 여러 청크 중 가장 최신 시간 유지
+                if source not in file_times or last_modified > file_times[source]:
+                    file_times[source] = last_modified
+
+        return file_times
+    except Exception as e:
+        print(f"DB 타임스탬프 조회 실패: {e}")
+        return {}
+
 def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     """
     [개선된 핵심 함수] Google Drive에서 파일을 가져와 텍스트를 추출하고 벡터 DB에 동기화합니다.
 
     개선사항:
+    - 🆕 증분 동기화: 변경된 파일만 자동 감지하여 업데이트
     - 중복 방지: 파일별로 기존 데이터 삭제 후 재삽입
     - 파일 타입별 최적 청크 크기
     - 섹션 태그를 메타데이터로 분리
@@ -245,11 +273,12 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     Args:
         folder_id: Google Drive 폴더 ID
         supabase_client: Supabase 클라이언트
-        force_update: True일 경우 기존 문서 삭제 후 재색인
+        force_update: True일 경우 전체 재색인 (기본 False = 증분 동기화)
     """
     creds, _ = google.auth.default()
     service = build('drive', 'v3', credentials=creds)
 
+    # Drive에서 파일 목록 가져오기 (modifiedTime 포함)
     res = service.files().list(
         q=f"'{folder_id}' in parents and trashed=false",
         fields="files(id, name, modifiedTime)"
@@ -257,6 +286,66 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     files = res.get('files', [])
 
     st.write(f"🔍 폴더 내 파일 {len(files)}개 감지됨")
+
+    # 증분 동기화: 변경된 파일만 감지
+    files_to_process = []
+    files_to_delete = []
+
+    if not force_update:
+        # DB에서 기존 파일의 last_modified 조회
+        db_file_times = get_file_timestamps_from_db(supabase_client)
+        drive_file_names = {f['name'] for f in files}
+
+        new_count = 0
+        updated_count = 0
+        unchanged_count = 0
+
+        for f in files:
+            fname = f['name']
+            drive_modified = f.get('modifiedTime', '')
+
+            if fname not in db_file_times:
+                # 새 파일
+                files_to_process.append(f)
+                new_count += 1
+            elif drive_modified > db_file_times[fname]:
+                # 수정된 파일
+                files_to_process.append(f)
+                updated_count += 1
+            else:
+                # 변경 없음
+                unchanged_count += 1
+
+        # Drive에 없지만 DB에 있는 파일 = 삭제된 파일
+        for fname in db_file_times:
+            if fname not in drive_file_names:
+                files_to_delete.append(fname)
+
+        # 변경 사항 요약
+        st.info(f"""
+        📊 증분 동기화 분석
+        - 🆕 새 파일: {new_count}개
+        - 🔄 수정된 파일: {updated_count}개
+        - ✅ 변경 없음: {unchanged_count}개
+        - 🗑️ 삭제된 파일: {len(files_to_delete)}개
+        """)
+
+        if len(files_to_process) == 0 and len(files_to_delete) == 0:
+            st.success("✨ 모든 문서가 최신 상태입니다!")
+            return 0
+    else:
+        # 전체 재색인 모드
+        st.info("🔄 전체 재색인 모드 (모든 파일 처리)")
+        files_to_process = files
+
+    # 삭제된 파일 처리
+    deleted_count = 0
+    if files_to_delete:
+        st.write("🗑️ 삭제된 파일 정리 중...")
+        for fname in files_to_delete:
+            if delete_document_by_source(supabase_client, fname):
+                deleted_count += 1
+                st.caption(f"  ✅ {fname} 제거됨")
 
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     vector_store = SupabaseVectorStore(
@@ -269,12 +358,19 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     cnt = 0
     skipped = 0
     failed = 0
+    total_to_process = len(files_to_process)
+
+    if total_to_process == 0:
+        st.success(f"✅ 동기화 완료 (삭제: {deleted_count}개)")
+        return deleted_count
+
     progress = st.progress(0)
 
-    for i, f in enumerate(files):
+    for i, f in enumerate(files_to_process):
         fid, fname = f['id'], f['name']
+        drive_modified = f.get('modifiedTime', '')
         ext = fname.split('.')[-1].lower() if '.' in fname else ""
-        progress.progress((i+1)/len(files), text=f"처리 중: {fname}")
+        progress.progress((i+1)/total_to_process, text=f"처리 중: {fname}")
 
         if ext not in ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'csv', 'md', 'jpg', 'jpeg', 'png']:
             st.caption(f"⏩ [Skip] {fname} - 지원하지 않는 형식")
@@ -282,9 +378,9 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
             continue
 
         try:
-            # 기존 문서 삭제 (중복 방지)
-            if force_update:
-                delete_document_by_source(supabase_client, fname)
+            # 기존 문서 삭제 (증분 동기화 또는 전체 재색인)
+            # 증분 모드에서는 수정/새 파일만 여기 도달하므로 항상 삭제
+            delete_document_by_source(supabase_client, fname)
 
             # 파일 다운로드
             req = service.files().get_media(fileId=fid)
@@ -336,6 +432,7 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                                 "source": fname,
                                 "section": chunk_data["section"],  # 섹션은 메타데이터에
                                 "file_type": ext,
+                                "last_modified": drive_modified,  # 🆕 Drive의 수정 시간 저장
                                 "created_at": datetime.now().isoformat()
                             }
                         ))
@@ -356,15 +453,24 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     progress.empty()
 
     # 결과 요약
-    st.info(f"""
-    📊 동기화 완료
-    - ✅ 성공: {cnt}개
-    - ⏩ 건너뜀: {skipped}개
-    - ❌ 실패: {failed}개
-    - 📁 전체: {len(files)}개
-    """)
+    if not force_update:
+        st.info(f"""
+        📊 증분 동기화 완료
+        - ✅ 색인 성공: {cnt}개
+        - 🗑️ 삭제 처리: {deleted_count}개
+        - ⏩ 건너뜀: {skipped}개
+        - ❌ 실패: {failed}개
+        """)
+    else:
+        st.info(f"""
+        📊 전체 재색인 완료
+        - ✅ 성공: {cnt}개
+        - ⏩ 건너뜀: {skipped}개
+        - ❌ 실패: {failed}개
+        - 📁 전체: {len(files)}개
+        """)
 
-    return cnt
+    return cnt + deleted_count
 
 def search_similar_documents_with_retry(query, client, embeddings, top_k=5, threshold=0.5, max_retries=3):
     """

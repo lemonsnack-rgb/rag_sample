@@ -207,12 +207,12 @@ with st.sidebar:
                 except Exception as e: st.error(f"에러: {e}")
 
             c1, c2 = st.columns(2)
-            force_update = st.checkbox("기존 문서 덮어쓰기 (중복 방지)", value=True)
+            force_update = st.checkbox("전체 재색인 (느림, 안전)", value=False, help="체크 해제 시: 변경된 파일만 증분 동기화 (빠름)")
 
             if c1.button("문서 동기화"):
                 try:
                     cnt = sync_drive_to_db(fid, st.session_state.supabase_client, force_update=force_update)
-                    st.success(f"{cnt}개 완료")
+                    st.success(f"{cnt}개 처리 완료")
                 except Exception as e: st.error(f"실패: {e}")
 
             if c2.button("사전 동기화"):
