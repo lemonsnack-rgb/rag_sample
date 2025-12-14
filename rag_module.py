@@ -18,7 +18,6 @@ from supabase import create_client, Client
 # LangChain and Embedding Imports
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_community.vectorstores import SupabaseVectorStore
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 # File Parsing Libraries Imports
@@ -353,13 +352,8 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 deleted_count += 1
                 st.caption(f"  ✅ {fname} 제거됨")
 
+    # 임베딩 모델 초기화
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vector_store = SupabaseVectorStore(
-        client=supabase_client,
-        embedding=embeddings,
-        table_name="documents",
-        query_name="match_documents"
-    )
 
     cnt = 0
     skipped = 0
@@ -453,9 +447,25 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                         ))
 
             if docs:
-                vector_store.add_documents(docs)
-                st.success(f"✅ {fname} 완료 ({len(docs)}개 청크)")
-                cnt += 1
+                # 🔧 개선: SupabaseVectorStore 대신 직접 저장 (임베딩 차원 오류 해결)
+                try:
+                    for doc in docs:
+                        # 임베딩 생성 (768차원)
+                        embedding_vector = embeddings.embed_query(doc.page_content)
+
+                        # Supabase에 직접 삽입
+                        supabase_client.table("documents").insert({
+                            "content": doc.page_content,
+                            "metadata": doc.metadata,
+                            "embedding": embedding_vector  # 768차원 리스트
+                        }).execute()
+
+                    st.success(f"✅ {fname} 완료 ({len(docs)}개 청크)")
+                    cnt += 1
+                except Exception as insert_error:
+                    st.error(f"❌ {fname} 삽입 실패: {str(insert_error)[:100]}")
+                    print(f"삽입 에러 - {fname}: {insert_error}")
+                    failed += 1
             else:
                 st.warning(f"⚠️ {fname} - 유효한 청크 없음")
                 skipped += 1
