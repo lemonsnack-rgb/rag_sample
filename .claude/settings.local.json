@@ -29,7 +29,10 @@
       "Bash(cat:*)",
       "Bash(git commit:*)",
       "Bash(python debug_db_sample.py:*)",
-      "Bash(.\\venv\\Scripts\\python.exe:*)"
+      "Bash(.\\venv\\Scripts\\python.exe:*)",
+      "Bash(powershell -Command \".\\venv\\Scripts\\python.exe debug_db_sample.py\")",
+      "Bash(powershell -Command:*)",
+      "Bash(if not exist \".streamlit\" mkdir .streamlit)"
     ]
   }
 }

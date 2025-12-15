@@ -7,6 +7,10 @@ import time
 from datetime import datetime
 import streamlit as st
 
+# 🔧 긴급 수정: .env 파일 강제 로드
+from dotenv import load_dotenv
+load_dotenv(override=True)  # 기존 환경변수 덮어쓰기
+
 # Google Drive API import
 import google.auth
 from googleapiclient.discovery import build
