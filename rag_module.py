@@ -216,7 +216,7 @@ def init_vector_store():
 
     try:
         supabase_client: Client = create_client(url, key)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
         return {
             'supabase_client': supabase_client,
@@ -359,7 +359,7 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 st.caption(f"  ✅ {fname} 제거됨")
 
     # 임베딩 모델 초기화
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
     cnt = 0
     skipped = 0
