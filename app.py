@@ -38,7 +38,9 @@ except Exception as e: st.error(f"🚨 rag_module.py 로딩 실패! 원인: {e}"
 # 🌟🌟🌟 기본 동의어 사전 (최종 확인 및 복구) 🌟🌟🌟
 DEFAULT_SYNONYMS = {
     "심사료": ["게재료", "투고료", "논문 게재", "학회비", "논문 심사료"],
-    "인건비": ["노무비", "인력운영비", "학생 인건비"]
+    "인건비": ["노무비", "인력운영비", "학생 인건비"],
+    "물리학": ["새물리", "물리", "KPS"],
+    "투고": ["제출", "접수"]
 }
 
 try:
@@ -147,25 +149,8 @@ def expand_query(original_query, llm):
         elif any(re.search(rf'\b{re.escape(word)}\b', original_query) for word in v):
             final.append(k)
 
-    # 2. LLM 기반 의미 확장 (개선됨)
-    try:
-        if llm:
-            prompt = f"""다음 질문의 검색을 위해 의미적으로 관련된 키워드를 생성해줘.
-
-질문: {original_query}
-
-지침:
-- 동의어, 유사어, 관련 용어를 포함
-- 전문 용어의 경우 약어나 다른 표현도 포함
-- 최대 3개까지만
-- 형식: 키워드1, 키워드2, 키워드3
-
-키워드:"""
-            res = llm.generate_content(prompt)
-            keywords = [k.strip() for k in res.text.strip().split(',') if k.strip()]
-            final.extend(keywords[:3])  # 최대 3개로 제한
-    except:
-        pass
+    # 2. LLM 기반 의미 확장 제거 (환각 방지)
+    # 동의어 사전만 사용하여 명확한 확장만 수행
 
     # 중복 제거하되 원본 쿼리는 첫 번째로 유지
     unique_terms = [original_query] + [term for term in final[1:] if term not in final[:final.index(term) + 1]]
@@ -352,8 +337,8 @@ if query := st.chat_input("질문을 입력하세요..."):
 
                 all_docs, all_infos, seen_hashes = [], [], set()
 
-                # 🔧 개선: 원본 쿼리 가중치 3배 (확장 키워드 부작용 방지)
-                for idx, q in enumerate(search_queries):
+                # 확장된 쿼리로 검색 (가중치 없음 - 순수 유사도 사용)
+                for q in search_queries:
                     if st.session_state.supabase_client:
                         docs, infos = search_similar_documents(
                             q,
@@ -363,9 +348,6 @@ if query := st.chat_input("질문을 입력하세요..."):
                             dynamic_threshold=True
                         )
 
-                        # 원본 쿼리(idx=0)는 가중치 3배
-                        weight_multiplier = 3.0 if idx == 0 else 1.0
-
                         for d, i in zip(docs, infos):
                             normalized = re.sub(r'\s+', '', d.page_content)
                             content_hash = hash(normalized)
@@ -373,18 +355,14 @@ if query := st.chat_input("질문을 입력하세요..."):
                             if content_hash not in seen_hashes:
                                 seen_hashes.add(content_hash)
                                 all_docs.append(d)
-                                # 가중치 적용된 점수 (정렬용)
-                                weighted_info = i.copy()
-                                weighted_info['score'] = i['score'] * weight_multiplier
-                                weighted_info['original_score'] = i['score']  # 원본 점수 보존
-                                all_infos.append(weighted_info)
+                                all_infos.append(i)  # DB 점수 그대로 사용
 
-                # 점수 기준 정렬 및 상위 15개 선택 (가중치 적용된 score 사용)
+                # 점수 기준 정렬 및 상위 15개 선택
                 combined = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)[:15]
 
-                # 검색 결과 통계 표시 (원본 점수로 평균 계산)
+                # 검색 결과 통계 표시
                 if combined:
-                    avg_score = sum(x[1]['original_score'] for x in combined) / len(combined)
+                    avg_score = sum(x[1]['score'] for x in combined) / len(combined)
                     st.caption(f"📊 검색 결과: {len(combined)}개 문서, 평균 관련도: {avg_score:.2f}")
                 
                 # 결과 없음 처리 (검색 결과 0건)
