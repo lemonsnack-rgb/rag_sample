@@ -454,8 +454,13 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 # 🔧 개선: SupabaseVectorStore 대신 직접 저장 (임베딩 차원 오류 해결)
                 try:
                     for doc in docs:
-                        # 임베딩 생성 (768차원)
-                        embedding_vector = embeddings.embed_query(doc.page_content)
+                        # 🔧 개선: 파일명을 임베딩에 포함 (파일명 기반 검색 가능)
+                        # 예: "새물리 논문투고 규정" → "물리" 검색 시 매칭
+                        filename_prefix = doc.metadata.get("source", "").replace(".pdf", "").replace(".docx", "")
+                        content_with_context = f"[문서: {filename_prefix}]\n{doc.page_content}"
+
+                        # 임베딩 생성 (768차원) - 파일명 포함
+                        embedding_vector = embeddings.embed_query(content_with_context)
 
                         # 🔧 최종 수정: RPC 함수로 안전한 삽입
                         # Python 리스트를 직접 전달 (PostgreSQL이 FLOAT[]로 인식)
