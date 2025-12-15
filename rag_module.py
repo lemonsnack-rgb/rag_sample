@@ -506,9 +506,15 @@ def search_similar_documents_with_retry(query, client, embeddings, top_k=5, thre
     """
     재시도 로직이 추가된 검색 함수
     """
+    # 🔧 쿼리 전처리: 도메인 특화 용어 매핑
+    query_normalized = query
+    if "물리학" in query and "새물리" not in query:
+        query_normalized = query.replace("물리학", "새물리")
+        print(f"[쿼리 정규화] '{query}' → '{query_normalized}'")
+
     for attempt in range(max_retries):
         try:
-            query_vector = embeddings.embed_query(query)
+            query_vector = embeddings.embed_query(query_normalized)
 
             params = {
                 "query_embedding": query_vector,
