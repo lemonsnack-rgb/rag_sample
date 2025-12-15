@@ -23,6 +23,7 @@ from supabase import create_client, Client
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import SupabaseVectorStore
 
 # File Parsing Libraries Imports
 import pypdf
@@ -358,8 +359,14 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 deleted_count += 1
                 st.caption(f"  [OK] {fname} 제거됨")
 
-    # 임베딩 모델 초기화
+    # 임베딩 모델 및 벡터 스토어 초기화
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    vector_store = SupabaseVectorStore(
+        client=supabase_client,
+        embedding=embeddings,
+        table_name="documents",
+        query_name="match_documents"
+    )
 
     cnt = 0
     skipped = 0
@@ -451,20 +458,9 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                         ))
 
             if docs:
-                # 🔧 CRITICAL FIX: embed_documents() 사용 (embed_query()는 검색용!)
+                # ✅ SupabaseVectorStore 사용 (예전 작동하던 방식)
                 try:
-                    # 문서용 임베딩 생성 (배치 처리)
-                    texts = [doc.page_content for doc in docs]
-                    embedding_vectors = embeddings.embed_documents(texts)  # ✅ 문서 임베딩
-
-                    # RPC 함수로 안전한 삽입
-                    for doc, embedding_vector in zip(docs, embedding_vectors):
-                        supabase_client.rpc("insert_document_safe", {
-                            "p_content": doc.page_content,
-                            "p_metadata": doc.metadata,
-                            "p_embedding_array": embedding_vector
-                        }).execute()
-
+                    vector_store.add_documents(docs)
                     st.success(f"[OK] {fname} 완료 ({len(docs)}개 청크)")
                     cnt += 1
                 except Exception as insert_error:
@@ -506,15 +502,9 @@ def search_similar_documents_with_retry(query, client, embeddings, top_k=5, thre
     """
     재시도 로직이 추가된 검색 함수
     """
-    # 🔧 쿼리 전처리: 도메인 특화 용어 매핑
-    query_normalized = query
-    if "물리학" in query and "새물리" not in query:
-        query_normalized = query.replace("물리학", "새물리")
-        print(f"[쿼리 정규화] '{query}' → '{query_normalized}'")
-
     for attempt in range(max_retries):
         try:
-            query_vector = embeddings.embed_query(query_normalized)
+            query_vector = embeddings.embed_query(query)
 
             params = {
                 "query_embedding": query_vector,
