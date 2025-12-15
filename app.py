@@ -362,17 +362,18 @@ if query := st.chat_input("질문을 입력하세요..."):
                             if content_hash not in seen_hashes:
                                 seen_hashes.add(content_hash)
                                 all_docs.append(d)
-                                # 가중치 적용된 점수
+                                # 가중치 적용된 점수 (정렬용)
                                 weighted_info = i.copy()
                                 weighted_info['score'] = i['score'] * weight_multiplier
+                                weighted_info['original_score'] = i['score']  # 원본 점수 보존
                                 all_infos.append(weighted_info)
 
-                # 점수 기준 정렬 및 상위 15개 선택
+                # 점수 기준 정렬 및 상위 15개 선택 (가중치 적용된 score 사용)
                 combined = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)[:15]
 
-                # 검색 결과 통계 표시
+                # 검색 결과 통계 표시 (원본 점수로 평균 계산)
                 if combined:
-                    avg_score = sum(x[1]['score'] for x in combined) / len(combined)
+                    avg_score = sum(x[1]['original_score'] for x in combined) / len(combined)
                     st.caption(f"📊 검색 결과: {len(combined)}개 문서, 평균 관련도: {avg_score:.2f}")
                 
                 # 결과 없음 처리 (검색 결과 0건)
