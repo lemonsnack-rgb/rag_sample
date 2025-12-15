@@ -237,10 +237,10 @@ def delete_document_by_source(client, source_name):
     """
     try:
         result = client.table("documents").delete().eq("metadata->>source", source_name).execute()
-        print(f"✅ {source_name} 기존 데이터 삭제 완료")
+        print(f"[OK] {source_name} 기존 데이터 삭제 완료")
         return True
     except Exception as e:
-        print(f"❌ {source_name} 삭제 실패: {e}")
+        print(f"[ERROR] {source_name} 삭제 실패: {e}")
         return False
 
 def get_file_timestamps_from_db(supabase_client):
@@ -630,10 +630,10 @@ def reset_database(client):
         print(f"삭제 후 남은 문서: {remaining_docs}")
 
         if remaining_docs == 0:
-            print(f"✅ DB 삭제 성공: {total_docs}개 문서 삭제됨")
+            print(f"[OK] DB 삭제 성공: {total_docs}개 문서 삭제됨")
             return True
         else:
-            print(f"⚠️ 완전 삭제 실패: {remaining_docs}개 문서 남음")
+            print(f"[WARNING] 완전 삭제 실패: {remaining_docs}개 문서 남음")
             return False
 
     except Exception as e:
