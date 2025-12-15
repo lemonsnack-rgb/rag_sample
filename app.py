@@ -357,8 +357,19 @@ if query := st.chat_input("질문을 입력하세요..."):
                                 all_docs.append(d)
                                 all_infos.append(i)  # DB 점수 그대로 사용
 
-                # 점수 기준 정렬 및 상위 15개 선택
-                combined = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)[:15]
+                # 점수 기준 정렬
+                sorted_results = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)
+
+                # 🔧 다양성 확보: 파일별 최대 3개 청크로 제한
+                file_count = {}
+                combined = []
+                for doc, info in sorted_results:
+                    filename = info.get('filename', 'Unknown')
+                    if file_count.get(filename, 0) < 3:  # 파일당 최대 3개
+                        combined.append((doc, info))
+                        file_count[filename] = file_count.get(filename, 0) + 1
+                    if len(combined) >= 15:  # 총 15개까지
+                        break
 
                 # 검색 결과 통계 표시
                 if combined:
