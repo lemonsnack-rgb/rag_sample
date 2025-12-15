@@ -352,11 +352,11 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     # 삭제된 파일 처리
     deleted_count = 0
     if files_to_delete:
-        st.write("🗑️ 삭제된 파일 정리 중...")
+        st.write("[DELETE] 삭제된 파일 정리 중...")
         for fname in files_to_delete:
             if delete_document_by_source(supabase_client, fname):
                 deleted_count += 1
-                st.caption(f"  ✅ {fname} 제거됨")
+                st.caption(f"  [OK] {fname} 제거됨")
 
     # 임베딩 모델 초기화
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
@@ -367,7 +367,7 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     total_to_process = len(files_to_process)
 
     if total_to_process == 0:
-        st.success(f"✅ 동기화 완료 (삭제: {deleted_count}개)")
+        st.success(f"[OK] 동기화 완료 (삭제: {deleted_count}개)")
         return deleted_count
 
     progress = st.progress(0)
@@ -379,7 +379,7 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
         progress.progress((i+1)/total_to_process, text=f"처리 중: {fname}")
 
         if ext not in ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'csv', 'md', 'jpg', 'jpeg', 'png']:
-            st.caption(f"⏩ [Skip] {fname} - 지원하지 않는 형식")
+            st.caption(f"[SKIP] {fname} - 지원하지 않는 형식")
             skipped += 1
             continue
 
@@ -415,7 +415,7 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 content = extract_text_from_image(fh)
 
             if not content.strip():
-                st.warning(f"⚠️ {fname} - 내용 없음")
+                st.warning(f"[WARNING] {fname} - 내용 없음")
                 skipped += 1
                 continue
 
@@ -465,18 +465,18 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                             "p_embedding_array": embedding_vector
                         }).execute()
 
-                    st.success(f"✅ {fname} 완료 ({len(docs)}개 청크)")
+                    st.success(f"[OK] {fname} 완료 ({len(docs)}개 청크)")
                     cnt += 1
                 except Exception as insert_error:
-                    st.error(f"❌ {fname} 삽입 실패: {str(insert_error)[:100]}")
+                    st.error(f"[ERROR] {fname} 삽입 실패: {str(insert_error)[:100]}")
                     print(f"삽입 에러 - {fname}: {insert_error}")
                     failed += 1
             else:
-                st.warning(f"⚠️ {fname} - 유효한 청크 없음")
+                st.warning(f"[WARNING] {fname} - 유효한 청크 없음")
                 skipped += 1
 
         except Exception as e:
-            st.error(f"❌ {fname} 실패: {str(e)[:100]}")
+            st.error(f"[ERROR] {fname} 실패: {str(e)[:100]}")
             print(f"상세 에러 - {fname}: {e}")
             failed += 1
 
@@ -485,19 +485,19 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
     # 결과 요약
     if not force_update:
         st.info(f"""
-        📊 증분 동기화 완료
-        - ✅ 색인 성공: {cnt}개
-        - 🗑️ 삭제 처리: {deleted_count}개
-        - ⏩ 건너뜀: {skipped}개
-        - ❌ 실패: {failed}개
+        증분 동기화 완료
+        - 색인 성공: {cnt}개
+        - 삭제 처리: {deleted_count}개
+        - 건너뜀: {skipped}개
+        - 실패: {failed}개
         """)
     else:
         st.info(f"""
-        📊 전체 재색인 완료
-        - ✅ 성공: {cnt}개
-        - ⏩ 건너뜀: {skipped}개
-        - ❌ 실패: {failed}개
-        - 📁 전체: {len(files)}개
+        전체 재색인 완료
+        - 성공: {cnt}개
+        - 건너뜀: {skipped}개
+        - 실패: {failed}개
+        - 전체: {len(files)}개
         """)
 
     return cnt + deleted_count
