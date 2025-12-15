@@ -457,15 +457,12 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                         # 임베딩 생성 (768차원)
                         embedding_vector = embeddings.embed_query(doc.page_content)
 
-                        # 🔧 수정: PostgreSQL VECTOR 형식으로 명시적 변환
-                        # 리스트 → 문자열 "[0.123,0.456,...]" (공백 없이)
-                        vector_str = "[" + ",".join(map(str, embedding_vector)) + "]"
-
-                        # Supabase에 직접 삽입
-                        supabase_client.table("documents").insert({
-                            "content": doc.page_content,
-                            "metadata": doc.metadata,
-                            "embedding": vector_str  # PostgreSQL VECTOR 형식 문자열
+                        # 🔧 최종 수정: RPC 함수로 안전한 삽입
+                        # Python 리스트를 직접 전달 (PostgreSQL이 FLOAT[]로 인식)
+                        supabase_client.rpc("insert_document_safe", {
+                            "p_content": doc.page_content,
+                            "p_metadata": doc.metadata,
+                            "p_embedding_array": embedding_vector  # Python list → PostgreSQL FLOAT[]
                         }).execute()
 
                     st.success(f"✅ {fname} 완료 ({len(docs)}개 청크)")
