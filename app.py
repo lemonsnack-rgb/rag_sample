@@ -147,12 +147,23 @@ def expand_query(original_query, llm):
         elif any(re.search(rf'\b{re.escape(word)}\b', original_query) for word in v):
             final.append(k)
 
-    # 2. LLM 기반 확장 (선택적)
+    # 2. LLM 기반 의미 확장 (개선됨)
     try:
         if llm:
-            prompt = f"질문 '{original_query}'의 검색 키워드 2개만 추천해줘 (단어만, 쉼표로 구분)"
+            prompt = f"""다음 질문의 검색을 위해 의미적으로 관련된 키워드를 생성해줘.
+
+질문: {original_query}
+
+지침:
+- 동의어, 유사어, 관련 용어를 포함
+- 전문 용어의 경우 약어나 다른 표현도 포함
+- 최대 3개까지만
+- 형식: 키워드1, 키워드2, 키워드3
+
+키워드:"""
             res = llm.generate_content(prompt)
-            final.extend([k.strip() for k in res.text.split(',') if k.strip()])
+            keywords = [k.strip() for k in res.text.strip().split(',') if k.strip()]
+            final.extend(keywords[:3])  # 최대 3개로 제한
     except:
         pass
 
