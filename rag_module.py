@@ -23,7 +23,6 @@ from supabase import create_client, Client
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import SupabaseVectorStore
 
 # File Parsing Libraries Imports
 import pypdf
@@ -190,18 +189,20 @@ def get_optimal_splitter(file_type):
     """
     파일 타입에 따라 최적화된 청크 크기 반환
 
-    개선: 청크 크기 대폭 증가로 임베딩 품질 향상
-    - 더 많은 문맥 정보 → 더 정확한 의미 임베딩
-    - 검색 정확도 향상
+    최적화: 청크 크기 축소로 키워드 밀도 증가
+    - 800자: 키워드가 청크 내에서 높은 비중 차지
+    - 정확한 매칭 가능성 증가
+    - 규정집처럼 조항 단위가 중요한 문서에 최적
     """
     if file_type == 'xlsx':
-        return RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)  # 500 → 1500
+        return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     elif file_type == 'pptx':
-        return RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)  # 1500 → 2000
+        return RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     elif file_type == 'csv':
-        return RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)  # 500 → 1500
+        return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     else:
-        return RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)  # 1000 → 2000
+        # PDF, DOCX 등 일반 문서: 800자 권장
+        return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
 
 # ==================== [핵심 로직: Supabase 연결 및 동기화] ====================
 
@@ -359,14 +360,8 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 deleted_count += 1
                 st.caption(f"  [OK] {fname} 제거됨")
 
-    # 임베딩 모델 및 벡터 스토어 초기화
+    # 임베딩 모델 초기화
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    vector_store = SupabaseVectorStore(
-        client=supabase_client,
-        embedding=embeddings,
-        table_name="documents",
-        query_name="match_documents"
-    )
 
     cnt = 0
     skipped = 0
@@ -458,9 +453,20 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                         ))
 
             if docs:
-                # ✅ SupabaseVectorStore 사용 (예전 작동하던 방식)
+                # ✅ RPC 직접 호출 + embed_documents() (VECTOR(768) 저장)
                 try:
-                    vector_store.add_documents(docs)
+                    # 문서용 임베딩 생성 (배치 처리)
+                    texts = [doc.page_content for doc in docs]
+                    embedding_vectors = embeddings.embed_documents(texts)
+
+                    # RPC 함수로 안전한 삽입 (FLOAT[] → VECTOR(768))
+                    for doc, embedding_vector in zip(docs, embedding_vectors):
+                        supabase_client.rpc("insert_document_safe", {
+                            "p_content": doc.page_content,
+                            "p_metadata": doc.metadata,
+                            "p_embedding_array": embedding_vector
+                        }).execute()
+
                     st.success(f"[OK] {fname} 완료 ({len(docs)}개 청크)")
                     cnt += 1
                 except Exception as insert_error:
@@ -500,19 +506,34 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
 
 def search_similar_documents_with_retry(query, client, embeddings, top_k=5, threshold=0.5, max_retries=3):
     """
-    재시도 로직이 추가된 검색 함수
+    하이브리드 검색 함수 (Vector + Keyword)
+    - 벡터 유사도 60% + 키워드 매칭 40%
+    - 정확한 단어가 있으면 상위 노출 보장
     """
     for attempt in range(max_retries):
         try:
             query_vector = embeddings.embed_query(query)
 
-            params = {
-                "query_embedding": query_vector,
-                "match_threshold": threshold,
-                "match_count": top_k
-            }
-
-            response = client.rpc("match_documents", params).execute()
+            # 하이브리드 검색 시도 (실패 시 벡터 검색으로 폴백)
+            try:
+                params = {
+                    "query_embedding": query_vector,
+                    "query_text": query,  # 키워드 매칭용
+                    "match_threshold": threshold,
+                    "match_count": top_k,
+                    "keyword_weight": 0.4  # 키워드 가중치 40%
+                }
+                response = client.rpc("hybrid_search_documents", params).execute()
+                use_hybrid = True
+            except:
+                # hybrid_search_documents 함수가 없으면 기존 벡터 검색
+                params = {
+                    "query_embedding": query_vector,
+                    "match_threshold": threshold,
+                    "match_count": top_k
+                }
+                response = client.rpc("match_documents", params).execute()
+                use_hybrid = False
 
             docs = []
             infos = []
@@ -520,7 +541,12 @@ def search_similar_documents_with_retry(query, client, embeddings, top_k=5, thre
             for item in response.data:
                 content = item.get("content", "")
                 metadata = item.get("metadata", {})
-                score = item.get("similarity", 0.0)
+
+                # 하이브리드 점수 또는 벡터 유사도
+                if use_hybrid:
+                    score = item.get("hybrid_score", item.get("similarity", 0.0))
+                else:
+                    score = item.get("similarity", 0.0)
 
                 doc = Document(page_content=content, metadata=metadata)
                 docs.append(doc)

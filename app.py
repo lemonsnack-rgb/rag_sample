@@ -344,7 +344,7 @@ if query := st.chat_input("질문을 입력하세요..."):
                             q,
                             st.session_state.supabase_client,
                             st.session_state.embeddings,
-                            top_k=10,
+                            top_k=15,  # 10 → 15 (다양성 필터링 대비)
                             dynamic_threshold=True
                         )
 
@@ -357,8 +357,25 @@ if query := st.chat_input("질문을 입력하세요..."):
                                 all_docs.append(d)
                                 all_infos.append(i)  # DB 점수 그대로 사용
 
-                # 점수 기준 정렬 및 상위 15개 선택
-                combined = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)[:15]
+                # 점수 기준 정렬
+                sorted_results = sorted(zip(all_docs, all_infos), key=lambda x: x[1]['score'], reverse=True)
+
+                # 다양성 확보: 파일별 최대 3개 청크로 제한
+                MAX_CHUNKS_PER_SOURCE = 3
+                source_counts = {}
+                combined = []
+                for doc, info in sorted_results:
+                    source = info.get('filename', 'Unknown')
+                    current_count = source_counts.get(source, 0)
+
+                    if current_count >= MAX_CHUNKS_PER_SOURCE:
+                        continue  # 이미 이 문서에서 3개를 가져왔으면 스킵
+
+                    source_counts[source] = current_count + 1
+                    combined.append((doc, info))
+
+                    if len(combined) >= 15:  # 총 15개까지
+                        break
 
                 # 검색 결과 통계 표시
                 if combined:
