@@ -40,7 +40,12 @@ DEFAULT_SYNONYMS = {
     "심사료": ["게재료", "투고료", "논문 게재", "학회비", "논문 심사료"],
     "인건비": ["노무비", "인력운영비", "학생 인건비"],
     "물리학": ["새물리", "물리", "KPS"],
-    "투고": ["제출", "접수"]
+    "투고": ["제출", "접수"],
+    "인용": ["참고문헌", "레퍼런스", "reference", "citation", "출처", "참조", "문헌", "bibliography"],
+    "참고문헌": ["인용", "레퍼런스", "reference", "출처", "참조문헌", "bibliography", "citation"],
+    "출처": ["인용", "참고문헌", "reference", "출처스타일", "인용양식", "참조", "citation"],
+    "레퍼런스": ["reference", "참고문헌", "인용", "출처", "참조문헌"],
+    "양식": ["형식", "포맷", "format", "스타일", "style", "template"]
 }
 
 try:
@@ -132,11 +137,12 @@ def load_synonyms_from_drive(folder_id):
 
 def expand_query(original_query, llm):
     """
-    개선된 쿼리 확장 함수 - 완전 단어 매칭 사용
+    AI 기반 쿼리 확장 함수 (하이브리드 방식)
 
     개선사항:
-    - 부분 문자열 매칭 → 완전 단어 경계 매칭으로 변경
-    - 노이즈 감소 및 검색 정확도 향상
+    - 사전 기반 확장 (정확도 우선)
+    - AI 기반 의미적 확장 (커버리지 확대)
+    - 완전 단어 매칭으로 노이즈 감소
     """
     final = [original_query]
 
@@ -149,12 +155,33 @@ def expand_query(original_query, llm):
         elif any(re.search(rf'\b{re.escape(word)}\b', original_query) for word in v):
             final.append(k)
 
-    # 2. LLM 기반 의미 확장 제거 (환각 방지)
-    # 동의어 사전만 사용하여 명확한 확장만 수행
+    # 2. AI 기반 의미 확장 (제한적으로 활성화)
+    if llm:
+        try:
+            prompt = f"""다음 검색어와 의미적으로 관련된 학술 용어나 동의어를 3개 이내로 제시하세요.
+규칙:
+- 논문 작성 및 학술 규정과 관련된 용어만 제시
+- 일반적이고 명확한 용어만 사용 (모호한 표현 금지)
+- 각 용어는 쉼표로 구분하여 한 줄로 출력
+- 원래 검색어와 중복되는 내용은 제외
+
+검색어: "{original_query}"
+
+관련 용어 (3개 이내):"""
+
+            response = llm.generate_content(prompt)
+            if response and response.text:
+                ai_terms = [term.strip() for term in response.text.strip().split(',') if term.strip()]
+                # AI 제안 용어 중 원본과 다르고 짧은 것만 추가 (최대 3개)
+                ai_terms = [t for t in ai_terms if t != original_query and len(t) <= 20][:3]
+                final.extend(ai_terms)
+        except Exception as e:
+            print(f"AI 쿼리 확장 실패 (계속 진행): {e}")
+            # 실패해도 사전 기반 확장 결과는 유지
 
     # 중복 제거하되 원본 쿼리는 첫 번째로 유지
     unique_terms = [original_query] + [term for term in final[1:] if term not in final[:final.index(term) + 1]]
-    return unique_terms[:7]  # 최대 7개로 제한하여 노이즈 방지
+    return unique_terms[:10]  # 최대 10개로 확대 (AI 확장 고려)
 
 # ==================== [5. 사이드바] ====================
 with st.sidebar:
@@ -460,14 +487,30 @@ if query := st.chat_input("질문을 입력하세요..."):
                             else:
                                 st.write(ans)
                             
-                            # 원문 상세 보기
+                            # 원문 상세 보기 (실제 답변 생성에 사용된 문서만 표시)
                             st.markdown("---")
-                            st.caption("🔍 참고 문서 (클릭하여 원문 확인)")
-                            # 상위 5개 문서만 표시
-                            for i, info in enumerate([x[1] for x in combined][:5], 1):
-                                with st.expander(f"{i}. {info['filename']} (관련도: {info['score']:.2f})"):
-                                    st.info("💡 문서 원문:")
+                            st.caption("🔍 참고 문서 (답변 생성에 실제 사용된 청크)")
+
+                            # 실제 context에 포함된 문서만 필터링
+                            used_docs = []
+                            for x in combined:
+                                doc_content = x[0].page_content
+                                # context_text에 이 청크가 포함되어 있는지 확인
+                                if doc_content in context_text:
+                                    used_docs.append(x)
+                                    if len(used_docs) >= 5:
+                                        break
+
+                            # 키워드 매칭 여부 시각화
+                            for i, (doc, info) in enumerate(used_docs, 1):
+                                keyword_score = info.get('keyword_score', 0)
+                                icon = "🎯" if keyword_score > 0.3 else "📄"
+
+                                with st.expander(f"{icon} {i}. {info['filename']} (관련도: {info['score']:.2f})"):
+                                    st.info("💡 답변 생성에 사용된 청크 원문:")
                                     st.text(info.get('content', '내용 없음'))
+                                    if keyword_score > 0:
+                                        st.caption(f"🎯 키워드 매칭 점수: {keyword_score:.3f}")
 
                             curr_messages.append((query, ans))
                             st.session_state.chat_sessions[st.session_state.current_session_id]['messages'] = curr_messages

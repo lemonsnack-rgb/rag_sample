@@ -504,36 +504,61 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
 
     return cnt + deleted_count
 
-def search_similar_documents_with_retry(query, client, embeddings, top_k=5, threshold=0.5, max_retries=3):
+def search_similar_documents_with_retry(query, client, embeddings, top_k=5, threshold=0.5, max_retries=3, use_doc_level_ranking=True):
     """
     하이브리드 검색 함수 (Vector + Keyword)
     - 벡터 유사도 60% + 키워드 매칭 40%
     - 정확한 단어가 있으면 상위 노출 보장
+    - 문서 레벨 랭킹으로 청크 수가 많은 문서의 불공정한 우위 방지
     """
     for attempt in range(max_retries):
         try:
             query_vector = embeddings.embed_query(query)
 
-            # 하이브리드 검색 시도 (실패 시 벡터 검색으로 폴백)
-            try:
-                params = {
-                    "query_embedding": query_vector,
-                    "query_text": query,  # 키워드 매칭용
-                    "match_threshold": threshold,
-                    "match_count": top_k,
-                    "keyword_weight": 0.4  # 키워드 가중치 40%
-                }
-                response = client.rpc("hybrid_search_documents", params).execute()
-                use_hybrid = True
-            except:
-                # hybrid_search_documents 함수가 없으면 기존 벡터 검색
-                params = {
-                    "query_embedding": query_vector,
-                    "match_threshold": threshold,
-                    "match_count": top_k
-                }
-                response = client.rpc("match_documents", params).execute()
+            # 문서 레벨 랭킹 검색 시도 (우선)
+            if use_doc_level_ranking:
+                try:
+                    params = {
+                        "query_embedding": query_vector,
+                        "query_text": query,
+                        "match_threshold": threshold,
+                        "match_count": top_k,  # 상위 N개 문서
+                        "keyword_weight": 0.4,
+                        "chunks_per_doc": 2  # 각 문서당 2개 청크 반환
+                    }
+                    response = client.rpc("hybrid_search_documents_doc_ranked", params).execute()
+                    use_doc_ranking = True
+                    use_hybrid = True
+                except Exception as e:
+                    print(f"문서 레벨 랭킹 실패, 청크 레벨 랭킹으로 폴백: {e}")
+                    use_doc_ranking = False
+                    use_hybrid = False
+            else:
+                use_doc_ranking = False
                 use_hybrid = False
+
+            # 청크 레벨 하이브리드 검색 (폴백)
+            if not use_doc_ranking:
+                try:
+                    params = {
+                        "query_embedding": query_vector,
+                        "query_text": query,
+                        "match_threshold": threshold,
+                        "match_count": top_k,
+                        "keyword_weight": 0.4
+                    }
+                    response = client.rpc("hybrid_search_documents", params).execute()
+                    use_hybrid = True
+                except Exception as e:
+                    print(f"하이브리드 검색 실패, 벡터 검색으로 폴백: {e}")
+                    # 벡터 검색 (최종 폴백)
+                    params = {
+                        "query_embedding": query_vector,
+                        "match_threshold": threshold,
+                        "match_count": top_k
+                    }
+                    response = client.rpc("match_documents", params).execute()
+                    use_hybrid = False
 
             docs = []
             infos = []
@@ -542,7 +567,7 @@ def search_similar_documents_with_retry(query, client, embeddings, top_k=5, thre
                 content = item.get("content", "")
                 metadata = item.get("metadata", {})
 
-                # 하이브리드 점수 또는 벡터 유사도
+                # 점수 추출
                 if use_hybrid:
                     score = item.get("hybrid_score", item.get("similarity", 0.0))
                 else:
