@@ -491,9 +491,28 @@ if query := st.chat_input("질문을 입력하세요..."):
                             st.markdown("---")
                             st.caption("🔍 참고 문서 (답변 생성에 실제 사용된 청크)")
 
-                            # combined 리스트가 이미 답변 생성에 사용된 청크들임
-                            # 상위 5개만 표시
-                            used_docs = combined[:5]
+                            # 답변에서 언급된 문서명 추출
+                            import re
+                            mentioned_files = set()
+                            # [파일명.pdf 기반 해설] 패턴 추출
+                            patterns = re.findall(r'\[([^\]]+\.pdf)', ans)
+                            for pattern in patterns:
+                                mentioned_files.add(pattern)
+
+                            # 언급된 문서만 필터링
+                            used_docs = []
+                            for doc, info in combined:
+                                filename = info.get('filename', '')
+                                # 답변에 언급된 문서이거나, 언급된 문서가 없으면 상위 5개
+                                if not mentioned_files or any(mentioned in filename for mentioned in mentioned_files):
+                                    used_docs.append((doc, info))
+
+                            # 언급된 문서가 없으면 상위 5개 사용
+                            if not used_docs:
+                                used_docs = combined[:5]
+                            else:
+                                # 언급된 문서 중 상위 5개
+                                used_docs = used_docs[:5]
 
                             # 키워드 매칭 여부 시각화
                             for i, (doc, info) in enumerate(used_docs, 1):
