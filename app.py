@@ -491,15 +491,9 @@ if query := st.chat_input("질문을 입력하세요..."):
                             st.markdown("---")
                             st.caption("🔍 참고 문서 (답변 생성에 실제 사용된 청크)")
 
-                            # 실제 context에 포함된 문서만 필터링
-                            used_docs = []
-                            for x in combined:
-                                doc_content = x[0].page_content
-                                # context_text에 이 청크가 포함되어 있는지 확인
-                                if doc_content in context_text:
-                                    used_docs.append(x)
-                                    if len(used_docs) >= 5:
-                                        break
+                            # combined 리스트가 이미 답변 생성에 사용된 청크들임
+                            # 상위 5개만 표시
+                            used_docs = combined[:5]
 
                             # 키워드 매칭 여부 시각화
                             for i, (doc, info) in enumerate(used_docs, 1):
