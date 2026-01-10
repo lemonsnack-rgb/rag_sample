@@ -443,27 +443,29 @@ if query := st.chat_input("질문을 입력하세요..."):
                     
                     [지침]
                     1. **존칭/서두 금지:** '존경하는 직원 여러분께,' '안녕하세요,' 등의 불필요한 서두나 존칭을 절대 사용하지 마라. 답변은 중립적이고 건조한 전문가의 어조를 유지해라.
-                    2. **내용의 완결성 및 전문성 (최우선):** Context의 내용을 절대 생략하지 말고, 구체적인 수치, 조건, 예외사항을 빠짐없이 포함하여 전문적으로 상세하게 작성해라. **답변의 주체가 {main_source}에 따른 것임을 명확히 언급**해라.
-                    3. **다수 출처 통합 (필수):** Context에 여러 문서가 혼합되어 있다면, **[상세 규정 해설]** 섹션에서 내용이 섞이지 않도록 **출처별로 명확히 구분**하여 설명해라. (예: '**[규정 A 기반 해설]**'과 같이 볼드체 헤더 사용)
-                    4. **[핵심 결론] 섹션 형식 (강제):** - **반드시** '**[핵심 결론]**'으로 시작하고, 글머리 기호(- )와 **명사형 종결**의 개조식 문장으로만 작성해라.
-                    5. **[상세 규정 해설] 섹션 형식:**
-                       - 2, 3번 지침을 따라 Context의 내용을 상세하고 충분하게 작성하여 **핵심 결론보다 훨씬 길어야 한다.**
-                       - **서식:** 내용 구조화를 위해 **소제목은 일반 폰트 크기의 볼드체(`**소제목**`)**만 사용하고, 문단 간 빈 줄을 사용해라. 중요한 키워드는 **볼드체**로 강조해라. 표 데이터는 **마크다운 표**로 정리해라.
+                    2. **내용의 완결성 및 전문성 (최우선):** Context의 내용을 절대 생략하지 말고, 구체적인 수치, 조건, 예외사항을 빠짐없이 포함하여 전문적으로 상세하게 작성해라.
+                    3. **출처별 명확한 구분 (필수):** Context에 여러 문서가 있다면, **반드시 출처별로 구분**하여 작성해라. 각 출처마다 **"출처 N: 파일명.pdf"** 형식으로 시작하고, 해당 출처의 내용을 작성해라.
+                    4. **파일명 표기 (강제):** 출처를 명시할 때는 **반드시 전체 파일명(확장자 .pdf 포함)**을 정확히 써라. Context의 [문서 N] 부분에서 파일명을 찾아서 그대로 써라.
+                    5. **[핵심 결론] 섹션 형식 (강제):** 반드시 '**[핵심 결론]**'으로 시작하고, 글머리 기호(- )와 **명사형 종결**의 개조식 문장으로만 작성해라.
                     6. 답이 없으면 `[NO_CONTENT]` 라고만 써라.
-                    
+
                     질문: {query}
-                    
+
                     답변형식:
                     [핵심 결론]
                     - 결론 1
                     - 결론 2
+
                     ===DETAIL_START===
-                    **상세 규정 해설 소제목 (예: 적용 범위 및 조건)**
-                    내용 상세 기술...
-                    (반드시 빈 줄)
-                    **다음 소제목 (예: 유의사항)**
-                    내용 상세 기술...
-                    ===DOCS: 참고한 문서 번호===
+                    출처 1: 파일명.pdf
+
+                    (해당 출처의 상세 내용)
+
+                    출처 2: 파일명.pdf
+
+                    (해당 출처의 상세 내용)
+
+                    ===DOCS:파일명1.pdf,파일명2.pdf===
                     """
                     
                     if st.session_state.llm:
@@ -494,26 +496,46 @@ if query := st.chat_input("질문을 입력하세요..."):
                             # 답변에서 언급된 문서명 추출
                             import re
                             mentioned_files = set()
-                            # 답변에서 .pdf가 포함된 모든 파일명 추출
-                            # 패턴: 공백이나 대괄호가 아닌 문자들 + .pdf
-                            patterns = re.findall(r'([^\s\[\]]+\.pdf)', ans)
-                            for pattern in patterns:
-                                mentioned_files.add(pattern)
 
-                            # 언급된 문서만 필터링
+                            # 패턴 1: "출처 N: 파일명.pdf" 형식
+                            pattern1 = re.findall(r'출처\s*\d+\s*:\s*([^\n]+\.pdf)', ans)
+                            mentioned_files.update(pattern1)
+
+                            # 패턴 2: ===DOCS:파일명1.pdf,파일명2.pdf=== 형식
+                            docs_match = re.search(r'===DOCS:(.+?)===', ans)
+                            if docs_match:
+                                doc_list = docs_match.group(1).split(',')
+                                for doc in doc_list:
+                                    doc = doc.strip()
+                                    if doc and doc.endswith('.pdf'):
+                                        mentioned_files.add(doc)
+
+                            # 패턴 3: 일반적인 .pdf 파일명 (폴백)
+                            if not mentioned_files:
+                                pattern3 = re.findall(r'([^\s\[\],:]+\.pdf)', ans)
+                                mentioned_files.update(pattern3)
+
+                            # 언급된 문서만 필터링 (파일명 완전 일치 또는 부분 일치)
                             used_docs = []
+                            seen_files = set()
                             for doc, info in combined:
                                 filename = info.get('filename', '')
-                                # 답변에 언급된 문서이거나, 언급된 문서가 없으면 상위 5개
-                                if not mentioned_files or any(mentioned in filename for mentioned in mentioned_files):
-                                    used_docs.append((doc, info))
 
-                            # 언급된 문서가 없으면 상위 5개 사용
-                            if not used_docs:
-                                used_docs = combined[:5]
-                            else:
-                                # 언급된 문서 중 상위 5개
-                                used_docs = used_docs[:5]
+                                if not mentioned_files:
+                                    # 언급된 파일이 없으면 상위 5개
+                                    if filename not in seen_files:
+                                        seen_files.add(filename)
+                                        used_docs.append((doc, info))
+                                        if len(used_docs) >= 5:
+                                            break
+                                else:
+                                    # 언급된 파일과 매칭
+                                    for mentioned in mentioned_files:
+                                        if mentioned in filename or filename in mentioned:
+                                            if filename not in seen_files:
+                                                seen_files.add(filename)
+                                                used_docs.append((doc, info))
+                                            break
 
                             # 키워드 매칭 여부 시각화
                             for i, (doc, info) in enumerate(used_docs, 1):
