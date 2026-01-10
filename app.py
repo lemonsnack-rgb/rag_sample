@@ -494,8 +494,9 @@ if query := st.chat_input("질문을 입력하세요..."):
                             # 답변에서 언급된 문서명 추출
                             import re
                             mentioned_files = set()
-                            # [파일명.pdf 기반 해설] 패턴 추출
-                            patterns = re.findall(r'\[([^\]]+\.pdf)', ans)
+                            # 답변에서 .pdf가 포함된 모든 파일명 추출
+                            # 패턴: 공백이나 대괄호가 아닌 문자들 + .pdf
+                            patterns = re.findall(r'([^\s\[\]]+\.pdf)', ans)
                             for pattern in patterns:
                                 mentioned_files.add(pattern)
 
