@@ -14,7 +14,7 @@ Google Drive 문서를 기반으로 질문에 답변하는 AI 업무 비서입�
 
 - **Frontend**: Streamlit
 - **LLM**: Google Gemini 1.5 Flash (gemini-1.5-flash-latest)
-- **Embeddings**: Google Gemini text-embedding-004 (768차원)
+- **Embeddings**: Google Gemini gemini-embedding-001 (768차원)
 - **Vector DB**: Supabase pgvector
 - **Framework**: LangChain
 - **Cloud**: Google Drive API

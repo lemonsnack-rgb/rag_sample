@@ -32,6 +32,16 @@ from pptx import Presentation
 from PIL import Image
 import pytesseract
 
+EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_DIMENSION = 768
+
+
+def create_embeddings():
+    return GoogleGenerativeAIEmbeddings(
+        model=EMBEDDING_MODEL,
+        output_dimensionality=EMBEDDING_DIMENSION,
+    )
+
 # ==================== [텍스트 전처리 - 메타데이터 분리 개선] ====================
 def preprocess_text_with_section_headers(text):
     """
@@ -218,7 +228,7 @@ def init_vector_store():
 
     try:
         supabase_client: Client = create_client(url, key)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        embeddings = create_embeddings()
 
         return {
             'supabase_client': supabase_client,
@@ -361,7 +371,7 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
                 st.caption(f"  [OK] {fname} 제거됨")
 
     # 임베딩 모델 초기화
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    embeddings = create_embeddings()
 
     cnt = 0
     skipped = 0

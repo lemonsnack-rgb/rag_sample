@@ -15,9 +15,26 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 # ==================== [1. 시스템 인증 및 라이브러리 설정] ====================
-if "gcp_service_account" in st.secrets:
+load_dotenv(override=True)
+
+
+def load_streamlit_secrets():
     try:
-        service_account_info = dict(st.secrets["gcp_service_account"])
+        return dict(st.secrets)
+    except Exception:
+        return {}
+
+
+secrets_dict = load_streamlit_secrets()
+
+service_account_info = None
+for secret_key in ("gcp_service_account", "google_credentials"):
+    if secret_key in secrets_dict:
+        service_account_info = dict(secrets_dict[secret_key])
+        break
+
+if service_account_info:
+    try:
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8') as temp:
             json.dump(service_account_info, temp)
             temp_path = temp.name
@@ -48,14 +65,9 @@ DEFAULT_SYNONYMS = {
     "양식": ["형식", "포맷", "format", "스타일", "style", "template"]
 }
 
-try:
-    secrets_dict = dict(st.secrets)
-    if "GOOGLE_API_KEY" in secrets_dict:
-        os.environ["GOOGLE_API_KEY"] = secrets_dict["GOOGLE_API_KEY"]
-        os.environ["SUPABASE_URL"] = secrets_dict["SUPABASE_URL"]
-        os.environ["SUPABASE_KEY"] = secrets_dict["SUPABASE_KEY"]
-        os.environ["GOOGLE_DRIVE_FOLDER_ID"] = secrets_dict.get("GOOGLE_DRIVE_FOLDER_ID", "")
-except: pass
+for env_key in ("GOOGLE_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "GOOGLE_DRIVE_FOLDER_ID"):
+    if secrets_dict.get(env_key):
+        os.environ[env_key] = secrets_dict[env_key]
 
 st.set_page_config(page_title="WorkAnswer", layout="wide", initial_sidebar_state="expanded")
 
@@ -65,6 +77,7 @@ if 'embeddings' not in st.session_state: st.session_state.embeddings = None
 if 'llm' not in st.session_state: st.session_state.llm = None
 if 'admin_mode' not in st.session_state: st.session_state.admin_mode = False
 if 'system_initialized' not in st.session_state: st.session_state.system_initialized = False
+if 'system_init_error' not in st.session_state: st.session_state.system_init_error = None
 if 'dynamic_synonyms' not in st.session_state: st.session_state.dynamic_synonyms = DEFAULT_SYNONYMS.copy()
 if 'last_unanswered_query' not in st.session_state: st.session_state.last_unanswered_query = None
 if 'chat_sessions' not in st.session_state: st.session_state.chat_sessions = {}
@@ -85,7 +98,9 @@ if not st.session_state.system_initialized:
             st.session_state.llm = genai.GenerativeModel('models/gemini-2.5-flash')
         except: st.session_state.llm = None
         st.session_state.system_initialized = True
-    except: st.session_state.system_initialized = False
+    except Exception as e:
+        st.session_state.system_initialized = False
+        st.session_state.system_init_error = str(e)
 
 # ==================== [3. CSS 스타일링 (UI 유지)] ====================
 st.markdown("""
@@ -106,6 +121,9 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+if not st.session_state.system_initialized and st.session_state.system_init_error:
+    st.warning(f"시스템 초기화가 아직 완료되지 않았습니다. 환경변수 또는 secrets 설정을 확인하세요: {st.session_state.system_init_error}")
 
 # ==================== [4. 유틸리티 함수] ====================
 def format_docs(docs):
@@ -213,7 +231,8 @@ with st.sidebar:
     st.divider()
     with st.expander("설정 (관리자)"):
         pw = st.text_input("비밀번호", type="password")
-        if pw == st.secrets.get("ADMIN_PASSWORD", "admin"):
+        admin_password = secrets_dict.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD", "admin")
+        if pw == admin_password:
             st.session_state.admin_mode = True
         
         if st.session_state.admin_mode:
