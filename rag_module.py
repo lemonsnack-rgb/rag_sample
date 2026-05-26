@@ -34,6 +34,10 @@ import pytesseract
 
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSION = 768
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "4"))
+EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "5"))
+EMBEDDING_RETRY_BASE_SECONDS = float(os.getenv("EMBEDDING_RETRY_BASE_SECONDS", "8"))
+EMBEDDING_BATCH_DELAY_SECONDS = float(os.getenv("EMBEDDING_BATCH_DELAY_SECONDS", "2"))
 
 
 def create_embeddings():
@@ -41,6 +45,41 @@ def create_embeddings():
         model=EMBEDDING_MODEL,
         output_dimensionality=EMBEDDING_DIMENSION,
     )
+
+
+def embed_documents_with_retry(embeddings, texts):
+    embedding_vectors = []
+    batch_size = max(1, EMBEDDING_BATCH_SIZE)
+
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        batch_no = (start // batch_size) + 1
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+
+        for attempt in range(EMBEDDING_MAX_RETRIES):
+            try:
+                embedding_vectors.extend(embeddings.embed_documents(batch))
+                break
+            except Exception as e:
+                if attempt >= EMBEDDING_MAX_RETRIES - 1:
+                    raise
+
+                wait_seconds = EMBEDDING_RETRY_BASE_SECONDS * (2 ** attempt)
+                message = str(e)
+                if "RESOURCE_EXHAUSTED" not in message and "429" not in message:
+                    wait_seconds = min(wait_seconds, 10)
+
+                st.warning(
+                    f"임베딩 API 제한으로 대기 중입니다. "
+                    f"배치 {batch_no}/{total_batches}, 재시도 {attempt + 1}/{EMBEDDING_MAX_RETRIES}, "
+                    f"{wait_seconds:.0f}초 후 재시도합니다."
+                )
+                time.sleep(wait_seconds)
+
+        if start + batch_size < len(texts) and EMBEDDING_BATCH_DELAY_SECONDS > 0:
+            time.sleep(EMBEDDING_BATCH_DELAY_SECONDS)
+
+    return embedding_vectors
 
 # ==================== [텍스트 전처리 - 메타데이터 분리 개선] ====================
 def preprocess_text_with_section_headers(text):
@@ -396,10 +435,6 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
             continue
 
         try:
-            # 기존 문서 삭제 (증분 동기화 또는 전체 재색인)
-            # 증분 모드에서는 수정/새 파일만 여기 도달하므로 항상 삭제
-            delete_document_by_source(supabase_client, fname)
-
             # 파일 다운로드
             req = service.files().get_media(fileId=fid)
             fh = io.BytesIO()
@@ -465,9 +500,12 @@ def sync_drive_to_db(folder_id, supabase_client, force_update=False):
             if docs:
                 # ✅ RPC 직접 호출 + embed_documents() (VECTOR(768) 저장)
                 try:
-                    # 문서용 임베딩 생성 (배치 처리)
+                    # 문서용 임베딩 생성 (작은 배치 + 429 재시도)
                     texts = [doc.page_content for doc in docs]
-                    embedding_vectors = embeddings.embed_documents(texts)
+                    embedding_vectors = embed_documents_with_retry(embeddings, texts)
+
+                    # 임베딩 성공 후 기존 문서를 삭제해야 중간 실패 시 기존 검색 데이터가 보존됩니다.
+                    delete_document_by_source(supabase_client, fname)
 
                     # RPC 함수로 안전한 삽입 (FLOAT[] → VECTOR(768))
                     for doc, embedding_vector in zip(docs, embedding_vectors):
